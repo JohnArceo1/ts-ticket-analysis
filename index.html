@@ -896,7 +896,8 @@ function mapRecord(rec, idx){
   const agent    = (agentRaw && agentRaw!=='null' && agentRaw!=='0' && agentRaw!==0)
                    ? String(agentRaw).trim() : 'Unassigned';
   const site     = (rec.cf_2911||rec.site||rec.location||'Unknown').toString().trim();
-  const catRaw   = rec.ticketcategories||rec.techgroup||rec.category||rec.type||'';
+  const catRaw   = rec.ticketcategories||rec.category||rec.type||'';
+  const techgroup = (rec.techgroup||'').trim();
   const cat      = normCategory(catRaw);
   const priRaw   = rec.ticketpriorities||rec.priority||'P3';
   const pri      = normPriority(priRaw);
@@ -947,7 +948,7 @@ function mapRecord(rec, idx){
   return {
     id:    rec.ticket_no||rec.id||('SR-'+String(idx+1000).padStart(5,'0')),
     title: rec.ticket_title||rec.subject||'Service Request',
-    agent, site, cat, pri, st, created, updated, slaBreached, resolvedTime,
+    agent, site, cat, techgroup, pri, st, created, updated, slaBreached, resolvedTime,
     raw:   rec
   };
 }
@@ -1101,6 +1102,7 @@ async function fetchLiveData(){
   // ─────────────────────────────────────────────────────────────────
 
   showBanner('success', T.length.toLocaleString()+' live tickets loaded');
+  buildSearchIndex();  // rebuild searchable index from fresh data
   buildAll();          // re-render everything with real data
   updateStamp(T.length);
 }
@@ -2988,710 +2990,918 @@ let _aiThinking = false;
 let _aiHistory = [];
 
 // ── Core query engine ─────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+// SMART QUERY ENGINE v3 — Complete rewrite
+// Handles ALL scenarios: names, dates, departments, categories,
+// sites, priorities, statuses, comparisons, rankings, trends
+// ══════════════════════════════════════════════════════════════════
+// ── Search index — rebuilt on every data load ────────────────────
+let _searchIndex = { agents:[], sites:[], cats:[], techgroups:[], subcats:[], statuses:[], priorities:[] };
+
+function buildSearchIndex() {
+  const src = T.length ? T : getData();
+  if(!src.length) return;
+  _searchIndex = {
+    agents:      [...new Set(src.map(t=>t.agent).filter(a=>a&&a!=='Unassigned'))].sort(),
+    sites:       [...new Set(src.map(t=>t.site).filter(Boolean))].sort(),
+    cats:        [...new Set(src.map(t=>t.cat).filter(Boolean))].sort(),
+    techgroups:  [...new Set(src.map(t=>t.techgroup).filter(Boolean))].sort(),
+    subcats:     [...new Set(src.map(t=>t.raw?.cf_2583||'').filter(Boolean))].sort(),
+    statuses:    [...new Set(src.map(t=>t.st).filter(Boolean))].sort(),
+    priorities:  [...new Set(src.map(t=>t.pri).filter(Boolean))].sort(),
+  };
+  console.log('[Index] Built:', JSON.stringify({
+    agents: _searchIndex.agents.length,
+    sites: _searchIndex.sites.length,
+    cats: _searchIndex.cats.length,
+    techgroups: _searchIndex.techgroups.length,
+    subcats: _searchIndex.subcats.length,
+  }));
+}
+
 function queryTickets(q) {
   const src = T.length ? T : getData();
-  const now = new Date();
-  const ql  = q.toLowerCase();
+  if(!src.length) return '_No ticket data loaded yet. Please wait for the dashboard to connect._';
 
-  // ── Date helpers ─────────────────────────────────────────────────
+  const now  = new Date();
+  const ql   = q.toLowerCase().replace(/['']/g,"'").trim();
+
+  // ── Date boundaries ────────────────────────────────────────────
   const sod        = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const weekStart  = new Date(sod); weekStart.setDate(sod.getDate() - (sod.getDay()===0?6:sod.getDay()-1));
+  const weekStart  = new Date(sod); weekStart.setDate(sod.getDate()-(sod.getDay()===0?6:sod.getDay()-1));
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const lastMonthS = new Date(now.getFullYear(), now.getMonth()-1, 1);
-  const lastMonthE = new Date(now.getFullYear(), now.getMonth(), 0, 23,59,59);
+  const lastMonthE = new Date(now.getFullYear(), now.getMonth(), 0, 23,59,59,999);
   const last7      = new Date(now - 7*86400000);
   const last30     = new Date(now - 30*86400000);
   const last90     = new Date(now - 90*86400000);
-  const ageDays    = t => Math.floor((now - t.created)/86400000);
+  const ageDays    = t => Math.floor((now - t.created) / 86400000);
 
-  function periodFilter(tickets, hint) {
-    if(!hint) return tickets;
-    const h = hint.toLowerCase();
-    if(h==='today')      return tickets.filter(t=>t.created>=sod);
-    if(h==='week'||h==='this week') return tickets.filter(t=>t.created>=weekStart);
-    if(h==='month'||h==='this month') return tickets.filter(t=>t.created>=monthStart);
-    if(h==='last month') return tickets.filter(t=>t.created>=lastMonthS && t.created<=lastMonthE);
-    if(h==='last 7'||h==='7 days') return tickets.filter(t=>t.created>=last7);
-    if(h==='last 30'||h==='30 days') return tickets.filter(t=>t.created>=last30);
-    if(h==='last 90'||h==='90 days'||h==='quarter') return tickets.filter(t=>t.created>=last90);
-    return tickets;
-  }
+  // ── Month map ──────────────────────────────────────────────────
+  const MM = {january:0,jan:0,february:1,feb:1,march:2,mar:2,april:3,apr:3,
+    may:4,june:5,jun:5,july:6,jul:6,august:7,aug:7,september:8,sep:8,sept:8,
+    october:9,oct:9,november:10,nov:10,december:11,dec:11};
+  const MONTH_NAMES = ['January','February','March','April','May','June',
+    'July','August','September','October','November','December'];
+  const MONTH_RE = 'january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec';
 
-  function detectPeriod(q) {
-    if(/\btoday\b/.test(q)) return 'today';
-    if(/this week/.test(q))  return 'week';
-    if(/last week/.test(q))  return 'last week';
-    if(/this month/.test(q)) return 'month';
-    if(/last month/.test(q)) return 'last month';
-    if(/last 7/.test(q))     return 'last 7';
-    if(/last 30/.test(q))    return 'last 30';
-    if(/last 90|quarter/.test(q)) return 'last 90';
+  // ── Period detection (returns {start,end,label} or null) ───────
+  function parsePeriod(q) {
+    // Specific date: "january 15, 2026" / "jan 15 2026" / "15 january 2026"
+    let m;
+    m = q.match(new RegExp('\\b('+MONTH_RE+')\\s+(\\d{1,2})[,\\s]+(\\d{4})\\b','i'));
+    if(m && MM[m[1].toLowerCase()]!==undefined) {
+      const s=new Date(+m[3],MM[m[1].toLowerCase()],+m[2]); const e=new Date(s); e.setHours(23,59,59,999);
+      return {start:s,end:e,label:MONTH_NAMES[MM[m[1].toLowerCase()]]+' '+m[2]+', '+m[3]};
+    }
+    m = q.match(new RegExp('\\b(\\d{1,2})\\s+('+MONTH_RE+')\\s+(\\d{4})\\b','i'));
+    if(m && MM[m[2].toLowerCase()]!==undefined) {
+      const s=new Date(+m[3],MM[m[2].toLowerCase()],+m[1]); const e=new Date(s); e.setHours(23,59,59,999);
+      return {start:s,end:e,label:MONTH_NAMES[MM[m[2].toLowerCase()]]+' '+m[1]+', '+m[3]};
+    }
+    // Month + year: "november 2025", "last november 2025"
+    m = q.match(new RegExp('\\b('+MONTH_RE+')\\s+(\\d{4})\\b','i'));
+    if(m && MM[m[1].toLowerCase()]!==undefined) {
+      const mi=MM[m[1].toLowerCase()],yr=+m[2];
+      return {start:new Date(yr,mi,1),end:new Date(yr,mi+1,0,23,59,59,999),
+        label:MONTH_NAMES[mi]+' '+yr};
+    }
+    // Month without year: "last november", "in march"
+    m = q.match(new RegExp('\\b(?:last|in|during|for|of)\\s+('+MONTH_RE+')\\b','i'));
+    if(m && MM[m[1].toLowerCase()]!==undefined) {
+      const mi=MM[m[1].toLowerCase()];
+      const yr = mi>now.getMonth() ? now.getFullYear()-1 : now.getFullYear();
+      return {start:new Date(yr,mi,1),end:new Date(yr,mi+1,0,23,59,59,999),
+        label:MONTH_NAMES[mi]+' '+yr};
+    }
+    // Quarter: "Q1 2025", "first quarter 2025"
+    m = q.match(/\bq([1-4])\s*(20\d{2})\b/i);
+    if(m) {
+      const qi=(+m[1]-1)*3, yr=+m[2];
+      return {start:new Date(yr,qi,1),end:new Date(yr,qi+3,0,23,59,59,999),label:'Q'+m[1]+' '+yr};
+    }
+    // Year only: "in 2024", "during 2025", "year 2025", "2024 tickets"
+    m = q.match(/\b(20\d{2})\b/);
+    if(m && +m[1]>=2020 && +m[1]<=now.getFullYear()+1)
+      return {start:new Date(+m[1],0,1),end:new Date(+m[1],11,31,23,59,59,999),label:'Year '+m[1]};
+    // Named periods
+    if(/\btoday\b/.test(q))              return {start:sod,      end:new Date(sod.getTime()+86399999),label:'Today'};
+    if(/\byesterday\b/.test(q))          { const y=new Date(sod-86400000); return {start:y,end:new Date(y.getTime()+86399999),label:'Yesterday'}; }
+    if(/this week/.test(q))              return {start:weekStart,end:now,label:'This Week'};
+    if(/last week/.test(q))              { const lws=new Date(weekStart-7*86400000); return {start:lws,end:new Date(weekStart-1),label:'Last Week'}; }
+    if(/this month/.test(q))             return {start:monthStart,end:now,label:'This Month'};
+    if(/last month/.test(q))             return {start:lastMonthS,end:lastMonthE,label:'Last Month'};
+    if(/last\s*7|past\s*7|7\s*days?/.test(q))  return {start:last7,end:now,label:'Last 7 Days'};
+    if(/last\s*30|past\s*30|30\s*days?/.test(q)) return {start:last30,end:now,label:'Last 30 Days'};
+    if(/last\s*90|past\s*90|90\s*days?|quarter/.test(q)) return {start:last90,end:now,label:'Last 90 Days'};
     return null;
   }
 
-  // ── Name matching helpers ─────────────────────────────────────────
-  function allSites()  { return [...new Set(src.map(t=>t.site))]; }
-  function allAgents() { return [...new Set(src.map(t=>t.agent).filter(a=>a&&a!=='Unassigned'))]; }
-
-  function matchSites(q) {
-    const sites = allSites();
-    return sites.filter(s => q.includes(s.toLowerCase()) ||
-      (s.length>4 && q.includes(s.toLowerCase().slice(0,5))));
+  function applyPeriod(tickets, p) {
+    if(!p) return tickets;
+    return tickets.filter(t=>t.created>=p.start && t.created<=p.end);
   }
 
-  // ── Name helpers ─────────────────────────────────────────────────
-  function normName(s) {
-    return s.toLowerCase().replace(/[^a-z0-9]/g,' ').replace(/\s+/g,' ').trim();
+  // ── Dynamic data lookups ───────────────────────────────────────
+  // Use pre-built search index (updated on every data load)
+  const allAgentNames = () => _searchIndex.agents.length ? _searchIndex.agents : [...new Set(src.map(t=>t.agent).filter(a=>a&&a!=='Unassigned'))];
+  const allSiteNames  = () => _searchIndex.sites.length  ? _searchIndex.sites  : [...new Set(src.map(t=>t.site).filter(Boolean))];
+  const allStatuses   = () => _searchIndex.statuses.length? _searchIndex.statuses:[...new Set(src.map(t=>t.st).filter(Boolean))];
+  const allCatNames   = () => {
+    const base = _searchIndex.cats.length ? _searchIndex.cats : [...new Set(src.map(t=>t.cat).filter(Boolean))];
+    const sub  = _searchIndex.subcats.length ? _searchIndex.subcats : [...new Set(src.map(t=>t.raw?.cf_2583||'').filter(Boolean))];
+    return [...new Set([...base,...sub])];
+  };
+  const allTechgroups = () => _searchIndex.techgroups.length ? _searchIndex.techgroups : [...new Set(src.map(t=>t.techgroup).filter(Boolean))];
+
+  // Techgroup alias map — maps query keywords → actual techgroup substrings
+  const TG_ALIASES = {
+    'tpmo':            ['technical project management','tpmo'],
+    'noc':             ['noc operations','noc systems','noc'],
+    'service desk':    ['service desk'],
+    'on-site':         ['on-site support','on site support'],
+    'on site':         ['on-site support','on site support'],
+    'onsite':          ['on-site support','on site support'],
+    'access control':  ['access control and security','acs'],
+    'acs':             ['access control and security','acs'],
+    'security':        ['access control and security'],
+    'common area':     ['common area team','common area'],
+    'cat':             ['common area team'],
+    'network':         ['network operations','noc operations'],
+    'helpdesk':        ['service desk','helpdesk'],
+    'it support':      ['service desk','on-site support'],
+    'telecom':         ['telecom','telecommunications'],
+    'infrastructure':  ['infrastructure'],
+    'project':         ['technical project management','tpmo'],
+  };
+
+  // ── Employee registry — all known staff ──────────────────────
+  const EMPLOYEE_REGISTRY = [
+  { canonical:"Clinton Marsh", norm:"clinton marsh", tokens:['clinton', 'marsh'], surname:"marsh" },
+  { canonical:"Jupiter Ng", norm:"jupiter ng", tokens:['jupiter', 'ng'], surname:"ng" },
+  { canonical:"Marie Josephine Montiflor", norm:"marie josephine montiflor", tokens:['marie', 'josephine', 'montiflor'], surname:"montiflor" },
+  { canonical:"Kristian Ancero", norm:"kristian ancero", tokens:['kristian', 'ancero'], surname:"ancero" },
+  { canonical:"Krizzel Ann Etrata", norm:"krizzel ann etrata", tokens:['krizzel', 'ann', 'etrata'], surname:"etrata" },
+  { canonical:"Angela Aquino", norm:"angela aquino", tokens:['angela', 'aquino'], surname:"aquino" },
+  { canonical:"Giecelle Fernandez", norm:"giecelle fernandez", tokens:['giecelle', 'fernandez'], surname:"fernandez" },
+  { canonical:"Jennielyn Anter", norm:"jennielyn anter", tokens:['jennielyn', 'anter'], surname:"anter" },
+  { canonical:"Jerome Rasay", norm:"jerome rasay", tokens:['jerome', 'rasay'], surname:"rasay" },
+  { canonical:"John Michael Arceo I", norm:"john michael arceo i", tokens:['john', 'michael', 'arceo'], surname:"arceo" },
+  { canonical:"Christopher Eduard Santos", norm:"christopher eduard santos", tokens:['christopher', 'eduard', 'santos'], surname:"santos" },
+  { canonical:"Angelito Balat", norm:"angelito balat", tokens:['angelito', 'balat'], surname:"balat" },
+  { canonical:"Jomar Sajorda", norm:"jomar sajorda", tokens:['jomar', 'sajorda'], surname:"sajorda" },
+  { canonical:"Chrisdan Evalla", norm:"chrisdan evalla", tokens:['chrisdan', 'evalla'], surname:"evalla" },
+  { canonical:"Angelou Dela Cruz", norm:"angelou dela cruz", tokens:['angelou', 'dela', 'cruz'], surname:"cruz" },
+  { canonical:"Sharlene Felicia", norm:"sharlene felicia", tokens:['sharlene', 'felicia'], surname:"felicia" },
+  { canonical:"Michael De Guzman", norm:"michael de guzman", tokens:['michael', 'de', 'guzman'], surname:"guzman" },
+  { canonical:"Janzen Estrada", norm:"janzen estrada", tokens:['janzen', 'estrada'], surname:"estrada" },
+  { canonical:"Philip Gamit", norm:"philip gamit", tokens:['philip', 'gamit'], surname:"gamit" },
+  { canonical:"Jayson Ibarlin", norm:"jayson ibarlin", tokens:['jayson', 'ibarlin'], surname:"ibarlin" },
+  { canonical:"Shannon Chua", norm:"shannon chua", tokens:['shannon', 'chua'], surname:"chua" },
+  { canonical:"Clark Alfonso", norm:"clark alfonso", tokens:['clark', 'alfonso'], surname:"alfonso" },
+  { canonical:"Kevin Pareja", norm:"kevin pareja", tokens:['kevin', 'pareja'], surname:"pareja" },
+  { canonical:"Jomar Estrada", norm:"jomar estrada", tokens:['jomar', 'estrada'], surname:"estrada" },
+  { canonical:"Julius Baricuatro", norm:"julius baricuatro", tokens:['julius', 'baricuatro'], surname:"baricuatro" },
+  { canonical:"Terence Manuel", norm:"terence manuel", tokens:['terence', 'manuel'], surname:"manuel" },
+  { canonical:"Jun Nabor", norm:"jun nabor", tokens:['jun', 'nabor'], surname:"nabor" },
+  { canonical:"Smith Besario", norm:"smith besario", tokens:['smith', 'besario'], surname:"besario" },
+  { canonical:"Nadzmekhan Asis", norm:"nadzmekhan asis", tokens:['nadzmekhan', 'asis'], surname:"asis" },
+  { canonical:"Roustan Adlawan", norm:"roustan adlawan", tokens:['roustan', 'adlawan'], surname:"adlawan" },
+  { canonical:"Christopher Del Rosario", norm:"christopher del rosario", tokens:['christopher', 'del', 'rosario'], surname:"rosario" },
+  { canonical:"John Paul Loria", norm:"john paul loria", tokens:['john', 'paul', 'loria'], surname:"loria" },
+  { canonical:"Era Baysa", norm:"era baysa", tokens:['era', 'baysa'], surname:"baysa" },
+  { canonical:"Jeffrey Fugado", norm:"jeffrey fugado", tokens:['jeffrey', 'fugado'], surname:"fugado" },
+  { canonical:"Hanna Mae Ultado", norm:"hanna mae ultado", tokens:['hanna', 'mae', 'ultado'], surname:"ultado" },
+  { canonical:"Jade Matos Ramirez", norm:"jade matos ramirez", tokens:['jade', 'matos', 'ramirez'], surname:"ramirez" },
+  { canonical:"Leah Omandac", norm:"leah omandac", tokens:['leah', 'omandac'], surname:"omandac" },
+  { canonical:"Isidove Belleza", norm:"isidove belleza", tokens:['isidove', 'belleza'], surname:"belleza" },
+  { canonical:"Darwen Gequillo", norm:"darwen gequillo", tokens:['darwen', 'gequillo'], surname:"gequillo" },
+  { canonical:"Aldrick Samia", norm:"aldrick samia", tokens:['aldrick', 'samia'], surname:"samia" },
+  { canonical:"Jhomel Langrio", norm:"jhomel langrio", tokens:['jhomel', 'langrio'], surname:"langrio" },
+  { canonical:"Byron Templo", norm:"byron templo", tokens:['byron', 'templo'], surname:"templo" },
+  { canonical:"Joshua Baylas", norm:"joshua baylas", tokens:['joshua', 'baylas'], surname:"baylas" },
+  { canonical:"Robert Godoy", norm:"robert godoy", tokens:['robert', 'godoy'], surname:"godoy" },
+  { canonical:"Alisa Sunga", norm:"alisa sunga", tokens:['alisa', 'sunga'], surname:"sunga" },
+  { canonical:"Reñigo Galvez", norm:"renigo galvez", tokens:['renigo', 'galvez'], surname:"galvez" },
+  { canonical:"Steven Icasa", norm:"steven icasa", tokens:['steven', 'icasa'], surname:"icasa" },
+  { canonical:"Patnubay Endozo", norm:"patnubay endozo", tokens:['patnubay', 'endozo'], surname:"endozo" },
+  { canonical:"Mark Lester Casabuena", norm:"mark lester casabuena", tokens:['mark', 'lester', 'casabuena'], surname:"casabuena" },
+  { canonical:"Jericho Mariano", norm:"jericho mariano", tokens:['jericho', 'mariano'], surname:"mariano" },
+  { canonical:"Michael Alarcon", norm:"michael alarcon", tokens:['michael', 'alarcon'], surname:"alarcon" },
+  { canonical:"Rommel Isorena", norm:"rommel isorena", tokens:['rommel', 'isorena'], surname:"isorena" },
+  { canonical:"David Franz Marquez", norm:"david franz marquez", tokens:['david', 'franz', 'marquez'], surname:"marquez" },
+  { canonical:"Christian Cabanos", norm:"christian cabanos", tokens:['christian', 'cabanos'], surname:"cabanos" },
+  { canonical:"Shela Casimiro", norm:"shela casimiro", tokens:['shela', 'casimiro'], surname:"casimiro" },
+  { canonical:"Joseph Competente", norm:"joseph competente", tokens:['joseph', 'competente'], surname:"competente" },
+  { canonical:"Garry Jhon Jovillo", norm:"garry jhon jovillo", tokens:['garry', 'jhon', 'jovillo'], surname:"jovillo" },
+  { canonical:"Alejandro Valdez", norm:"alejandro valdez", tokens:['alejandro', 'valdez'], surname:"valdez" },
+  { canonical:"Ian Rex Durian", norm:"ian rex durian", tokens:['ian', 'rex', 'durian'], surname:"durian" },
+  { canonical:"John Patrick Manlangit", norm:"john patrick manlangit", tokens:['john', 'patrick', 'manlangit'], surname:"manlangit" },
+  { canonical:"Jasper Clark Rapadas", norm:"jasper clark rapadas", tokens:['jasper', 'clark', 'rapadas'], surname:"rapadas" },
+  { canonical:"Ansherine Abanes", norm:"ansherine abanes", tokens:['ansherine', 'abanes'], surname:"abanes" },
+  { canonical:"Allan Nicolas Jane", norm:"allan nicolas jane", tokens:['allan', 'nicolas', 'jane'], surname:"jane" },
+  { canonical:"Ismael Rome Louis Durian", norm:"ismael rome louis durian", tokens:['ismael', 'rome', 'louis', 'durian'], surname:"durian" },
+  { canonical:"Julius Ceazer Roldan", norm:"julius ceazer roldan", tokens:['julius', 'ceazer', 'roldan'], surname:"roldan" },
+  { canonical:"Paul Matthew Mariano", norm:"paul matthew mariano", tokens:['paul', 'matthew', 'mariano'], surname:"mariano" },
+  { canonical:"Bryan Adriano", norm:"bryan adriano", tokens:['bryan', 'adriano'], surname:"adriano" },
+  { canonical:"Anne Marielle Hilario", norm:"anne marielle hilario", tokens:['anne', 'marielle', 'hilario'], surname:"hilario" },
+  { canonical:"Jessie Jan Ramos", norm:"jessie jan ramos", tokens:['jessie', 'jan', 'ramos'], surname:"ramos" },
+  { canonical:"Marc Azupardo", norm:"marc azupardo", tokens:['marc', 'azupardo'], surname:"azupardo" },
+  { canonical:"Beverly Francisco", norm:"beverly francisco", tokens:['beverly', 'francisco'], surname:"francisco" },
+  { canonical:"Kyle Vincent Batoc", norm:"kyle vincent batoc", tokens:['kyle', 'vincent', 'batoc'], surname:"batoc" },
+  { canonical:"Krish Ramos", norm:"krish ramos", tokens:['krish', 'ramos'], surname:"ramos" },
+  { canonical:"Alec Joshua Rapada", norm:"alec joshua rapada", tokens:['alec', 'joshua', 'rapada'], surname:"rapada" },
+  { canonical:"Khemberly Pal", norm:"khemberly pal", tokens:['khemberly', 'pal'], surname:"pal" },
+  { canonical:"Anjanette Naron", norm:"anjanette naron", tokens:['anjanette', 'naron'], surname:"naron" },
+  { canonical:"Karlo Dimayuga", norm:"karlo dimayuga", tokens:['karlo', 'dimayuga'], surname:"dimayuga" },
+  { canonical:"Jonvert Dela Cruz", norm:"jonvert dela cruz", tokens:['jonvert', 'dela', 'cruz'], surname:"cruz" },
+  { canonical:"Joy Platero", norm:"joy platero", tokens:['joy', 'platero'], surname:"platero" },
+  { canonical:"Jonie Amparado", norm:"jonie amparado", tokens:['jonie', 'amparado'], surname:"amparado" },
+  { canonical:"Vina Mae Fabon", norm:"vina mae fabon", tokens:['vina', 'mae', 'fabon'], surname:"fabon" },
+  { canonical:"Chito Aguila", norm:"chito aguila", tokens:['chito', 'aguila'], surname:"aguila" },
+  { canonical:"Meriq Van Edcel Cantos", norm:"meriq van edcel cantos", tokens:['meriq', 'van', 'edcel', 'cantos'], surname:"cantos" },
+  { canonical:"Adrian Villa", norm:"adrian villa", tokens:['adrian', 'villa'], surname:"villa" },
+  { canonical:"Joshua Timothy Melchor", norm:"joshua timothy melchor", tokens:['joshua', 'timothy', 'melchor'], surname:"melchor" },
+  { canonical:"Poferio Santiago", norm:"poferio santiago", tokens:['poferio', 'santiago'], surname:"santiago" },
+  { canonical:"Jeffrey Dacumos", norm:"jeffrey dacumos", tokens:['jeffrey', 'dacumos'], surname:"dacumos" },
+  { canonical:"Rence Duldulao", norm:"rence duldulao", tokens:['rence', 'duldulao'], surname:"duldulao" },
+  { canonical:"Reynaldo Galang", norm:"reynaldo galang", tokens:['reynaldo', 'galang'], surname:"galang" },
+  { canonical:"Gemson Balala", norm:"gemson balala", tokens:['gemson', 'balala'], surname:"balala" },
+  { canonical:"John Jedidiah De Jesus", norm:"john jedidiah de jesus", tokens:['john', 'jedidiah', 'de', 'jesus'], surname:"jesus" },
+  { canonical:"Kenneth Espera", norm:"kenneth espera", tokens:['kenneth', 'espera'], surname:"espera" },
+  { canonical:"David Anthony Ruiz", norm:"david anthony ruiz", tokens:['david', 'anthony', 'ruiz'], surname:"ruiz" },
+  { canonical:"Kimberly Ciruelos", norm:"kimberly ciruelos", tokens:['kimberly', 'ciruelos'], surname:"ciruelos" },
+  { canonical:"Ace Justin Dela Cruz", norm:"ace justin dela cruz", tokens:['ace', 'justin', 'dela', 'cruz'], surname:"cruz" },
+  { canonical:"Steven Macale", norm:"steven macale", tokens:['steven', 'macale'], surname:"macale" },
+  { canonical:"Jose Dominic De Guzman", norm:"jose dominic de guzman", tokens:['jose', 'dominic', 'de', 'guzman'], surname:"guzman" },
+  { canonical:"Barry Balasbas", norm:"barry balasbas", tokens:['barry', 'balasbas'], surname:"balasbas" },
+  { canonical:"Angel Jullian Ocampo", norm:"angel jullian ocampo", tokens:['angel', 'jullian', 'ocampo'], surname:"ocampo" },
+  { canonical:"Mary Beatrice Soberano", norm:"mary beatrice soberano", tokens:['mary', 'beatrice', 'soberano'], surname:"soberano" },
+  { canonical:"Airis Pagal", norm:"airis pagal", tokens:['airis', 'pagal'], surname:"pagal" },
+  { canonical:"Christian Samontina", norm:"christian samontina", tokens:['christian', 'samontina'], surname:"samontina" },
+  { canonical:"Justein Khryss Garcia", norm:"justein khryss garcia", tokens:['justein', 'khryss', 'garcia'], surname:"garcia" },
+  { canonical:"Janice Cana", norm:"janice cana", tokens:['janice', 'cana'], surname:"cana" },
+  { canonical:"Von Espiritu", norm:"von espiritu", tokens:['von', 'espiritu'], surname:"espiritu" },
+  { canonical:"Denelyn Rasing", norm:"denelyn rasing", tokens:['denelyn', 'rasing'], surname:"rasing" },
+  { canonical:"Emmanuel Dalmacio", norm:"emmanuel dalmacio", tokens:['emmanuel', 'dalmacio'], surname:"dalmacio" },
+  { canonical:"Mark Daniel Torres", norm:"mark daniel torres", tokens:['mark', 'daniel', 'torres'], surname:"torres" },
+  { canonical:"Christian Domingo", norm:"christian domingo", tokens:['christian', 'domingo'], surname:"domingo" },
+  { canonical:"Michael John Alarcon", norm:"michael john alarcon", tokens:['michael', 'john', 'alarcon'], surname:"alarcon" },
+  { canonical:"Merig Van Edcel Cantos", norm:"merig van edcel cantos", tokens:['merig', 'van', 'edcel', 'cantos'], surname:"cantos" },
+  { canonical:"Sharlene Felicia", norm:"sharlene felicia", tokens:['sharlene', 'felicia'], surname:"felicia" },
+  { canonical:"Voltaire Aaron Garceron", norm:"voltaire aaron garceron", tokens:['voltaire', 'aaron', 'garceron'], surname:"garceron" },
+  { canonical:"Rica Sharmaine Magno", norm:"rica sharmaine magno", tokens:['rica', 'sharmaine', 'magno'], surname:"magno" },
+  { canonical:"Irene Billones", norm:"irene billones", tokens:['irene', 'billones'], surname:"billones" },
+  { canonical:"Edward Christian Guzman", norm:"edward christian guzman", tokens:['edward', 'christian', 'guzman'], surname:"guzman" },
+  { canonical:"Eldrich Clark Alfonso", norm:"eldrich clark alfonso", tokens:['eldrich', 'clark', 'alfonso'], surname:"alfonso" },
+  { canonical:"Denelyn Rasing", norm:"denelyn rasing", tokens:['denelyn', 'rasing'], surname:"rasing" },
+  { canonical:"Jhomel Langrio", norm:"jhomel langrio", tokens:['jhomel', 'langrio'], surname:"langrio" },
+  { canonical:"Michael McCullough", norm:"michael mccullough", tokens:['michael', 'mccullough'], surname:"mccullough" },
+  { canonical:"Mark Daniel Torres", norm:"mark daniel torres", tokens:['mark', 'daniel', 'torres'], surname:"torres" },
+  { canonical:"Emmanuel Dalmacio", norm:"emmanuel dalmacio", tokens:['emmanuel', 'dalmacio'], surname:"dalmacio" },
+  { canonical:"Voltaire Aaron Garceron", norm:"voltaire aaron garceron", tokens:['voltaire', 'aaron', 'garceron'], surname:"garceron" },
+  { canonical:"Christian Domingo", norm:"christian domingo", tokens:['christian', 'domingo'], surname:"domingo" },
+  { canonical:"Michael John Alarcon", norm:"michael john alarcon", tokens:['michael', 'john', 'alarcon'], surname:"alarcon" },
+  { canonical:"Anjanette Naron", norm:"anjanette naron", tokens:['anjanette', 'naron'], surname:"naron" },
+  { canonical:"Merig Van Edcel Cantos", norm:"merig van edcel cantos", tokens:['merig', 'van', 'edcel', 'cantos'], surname:"cantos" },
+  { canonical:"Sharlene Felicia", norm:"sharlene felicia", tokens:['sharlene', 'felicia'], surname:"felicia" }
+  ];
+
+  // ── STOP words for name matching ──────────────────────────────
+  const STOP = new Set(('how many tickets to the for show me who is handling what does have their '
+    +'count all give list find get about with and or by tell total work load summary details info '
+    +'current status today week month year this last check please can you do did has had been were '
+    +'was number of in on at a an my your his her its our they he she it i from since until between '
+    +'during fetch pull violated sla breach overdue are is assigned open closed resolved active '
+    +'most top worst best highest lowest rank which site agent engineer handling assignee number '
+    +'give show tell list display print').split(' '));
+  const SFXS = new Set(['i','ii','iii','iv','v','vi','vii','jr','sr','phd','md','dmd','rn']);
+
+  function normStr(s) { return s.toLowerCase().replace(/[^a-z0-9]/g,' ').replace(/\s+/g,' ').trim(); }
+
+  // ── Agent matching ─────────────────────────────────────────────
+  // Normalize query string for name matching (handle accents, punctuation)
+  function normQuery(q) {
+    return q.toLowerCase()
+      .replace(/[ñ]/g,'n').replace(/[àáâä]/g,'a').replace(/[èéêë]/g,'e')
+      .replace(/[ìíîï]/g,'i').replace(/[òóôö]/g,'o').replace(/[ùúûü]/g,'u')
+      .replace(/[^a-z0-9]/g,' ').replace(/\s+/g,' ').trim();
   }
 
-  // Non-name words to strip from query before matching
-  const STOP = new Set('how many tickets are assigned to the for show me who is handling what does have their count all give list open closed resolved active find get about with and or by tell total work load workload summary details info information current status today week month year this last check please can you do did has had been were was number of in on at a an my your his her its our they he she it i from since until between during fetch pull violated sla breach overdue open active'.split(' '));
+  function scoreNameAgainstQuery(norm, tokens, surname, qTokens) {
+    const qn = qTokens.join(' ');
+    // Full normalized name in query
+    if(qn.includes(norm)||tokens.filter(t=>!SFXS.has(t)).every(t=>qTokens.includes(t)))
+      return {score:10000,exact:true};
+    let score=0; const mi=new Set();
+    for(const qt of qTokens){
+      if(SFXS.has(qt)||qt.length<2) continue;
+      let bp=0,bi=-1;
+      for(let i=0;i<tokens.length;i++){
+        if(mi.has(i)) continue;
+        const tk=tokens[i], isSurname=(tk===surname), w=isSurname?3:1;
+        let pts=0;
+        if(tk===qt)                          pts=100*w;
+        else if(tk.startsWith(qt)&&qt.length>=3) pts=Math.round(70*w*qt.length/tk.length);
+        else if(qt.startsWith(tk)&&tk.length>=3) pts=Math.round(60*w*tk.length/qt.length);
+        if(pts>bp){bp=pts;bi=i;}
+      }
+      if(bp>0){score+=bp;mi.add(bi);}
+    }
+    const surnameIdx=tokens.indexOf(surname);
+    if(surnameIdx>=0&&mi.has(surnameIdx)&&mi.size>=2) score+=200;
+    if(surnameIdx>=0&&mi.has(surnameIdx)&&mi.size===1) score+=50;
+    if(mi.size===1&&!(surnameIdx>=0&&mi.has(surnameIdx))) {
+      const mt=tokens[[...mi][0]];
+      score = mt&&mt.length>=6 ? Math.floor(score*0.7) : Math.floor(score*0.3);
+    }
+    return {score,exact:false};
+  }
 
-  // Roman numeral suffixes — not surnames
-  const SUFFIXES = new Set(['i','ii','iii','iv','v','vi','jr','sr']);
-
-  function matchAgents(q) {
-    const agents = allAgents();
-    const qNorm  = normName(q);
-
-    // Strip stop words to get candidate name tokens
-    const qTokens = qNorm.split(' ').filter(t => t.length >= 2 && !STOP.has(t));
+  function findAgents(q) {
+    const liveAgents = allAgentNames();
+    const qn = normQuery(q);
+    const qTokens = qn.split(' ').filter(t=>t.length>=2&&!STOP.has(t));
     if(!qTokens.length) return [];
 
-    const scored = agents.map(a => {
-      const aNorm  = normName(a);
-      const aParts = aNorm.split(' ').filter(Boolean);
+    const seen = new Set();
+    const results = [];
 
-      // ── Tier 1: full name substring match ─────────────────
-      if(qNorm.includes(aNorm)) return { a, score:10000, exact:true };
-      // also try matching query tokens joined vs agent name
-      if(aNorm.split(' ').every(p => qTokens.includes(p))) return { a, score:9000, exact:true };
-
-      // ── Find surname (last non-suffix part) ───────────────
-      let surnameIdx = aParts.length - 1;
-      while(surnameIdx > 0 && SUFFIXES.has(aParts[surnameIdx])) surnameIdx--;
-      const surname = aParts[surnameIdx];
-
-      let score = 0;
-      const matchedIdx = new Set(); // prevent double-counting agent parts
-
-      for(const qt of qTokens) {
-        if(SUFFIXES.has(qt)) continue;
-        let bestForToken = 0;
-        let bestIdx = -1;
-
-        for(let i = 0; i < aParts.length; i++) {
-          if(matchedIdx.has(i)) continue;
-          const ap = aParts[i];
-          const isSurname = (i === surnameIdx);
-          const w = isSurname ? 3 : 1; // surname worth 3x
-
-          let pts = 0;
-          if(ap === qt)                          pts = 100 * w; // exact
-          else if(ap.startsWith(qt) && qt.length>=3) pts = Math.round(70 * w * qt.length/ap.length);
-          else if(qt.startsWith(ap) && ap.length>=3) pts = Math.round(60 * w * ap.length/qt.length);
-
-          if(pts > bestForToken) { bestForToken = pts; bestIdx = i; }
-        }
-        if(bestForToken > 0) { score += bestForToken; matchedIdx.add(bestIdx); }
+    // ── Score against employee registry first ────────────────────
+    for(const emp of EMPLOYEE_REGISTRY) {
+      const {score,exact} = scoreNameAgainstQuery(emp.norm, emp.tokens, emp.surname, qTokens);
+      if(score<50) continue;
+      // Find best matching live agent name for this registry entry
+      // Try exact canonical match first, then fuzzy
+      let liveMatch = liveAgents.find(a=>normStr(a)===emp.norm);
+      if(!liveMatch) {
+        // Try matching by surname
+        liveMatch = liveAgents.find(a=>{
+          const an=normStr(a).split(' ');
+          return an.includes(emp.surname)||normStr(a).includes(emp.surname);
+        });
       }
+      if(!liveMatch) {
+        // Try any token overlap
+        liveMatch = liveAgents.find(a=>{
+          const an=normQuery(a).split(' ');
+          return emp.tokens.some(t=>t.length>=4&&an.includes(t));
+        });
+      }
+      // Use canonical name if not found in live data (will return 0 tickets gracefully)
+      const resolvedName = liveMatch || emp.canonical;
+      if(!seen.has(resolvedName.toLowerCase())) {
+        seen.add(resolvedName.toLowerCase());
+        results.push({a:resolvedName,score,exact});
+      }
+    }
 
-      // Bonus: surname was among the matched parts
-      const surnameMatched = matchedIdx.has(surnameIdx);
-      if(surnameMatched && matchedIdx.size >= 2) score += 200; // surname + at least one other part
-      if(surnameMatched && matchedIdx.size === 1) score += 50;  // surname alone
+    // ── Also score live agents not in registry ───────────────────
+    for(const agent of liveAgents) {
+      if(seen.has(agent.toLowerCase())) continue;
+      const an = normQuery(agent);
+      const ap = an.split(' ').filter(Boolean);
+      let si=ap.length-1; while(si>0&&SFXS.has(ap[si]))si--;
+      const {score,exact} = scoreNameAgainstQuery(an, ap, ap[si], qTokens);
+      if(score>=50) {
+        seen.add(agent.toLowerCase());
+        results.push({a:agent,score,exact});
+      }
+    }
 
-      // Penalty: matched only first name (common name, low confidence)
-      if(matchedIdx.size === 1 && !surnameMatched) score = Math.floor(score * 0.3);
-
-      return { a, score, exact:false };
-    })
-    .filter(x => x.score >= 50)
-    .sort((a,b) => b.score - a.score);
-
-    return scored;
+    return results.sort((a,b)=>b.score-a.score);
   }
 
-  function bestMatchAgent(q) {
-    const matches = matchAgents(q);
-    if(!matches.length) return { agent:null, confident:false, candidates:[] };
-
-    const top    = matches[0];
-    const second = matches[1];
-    const gap    = second ? top.score - second.score : top.score;
-
-    const confident =
-      top.exact ||
-      matches.length === 1 ||
-      top.score >= 500 ||
-      (gap >= 150 && top.score >= 100) ||
-      (top.score >= 200 && (!second || top.score >= second.score * 2));
-
-    return {
-      agent:      top.a,
-      score:      top.score,
-      confident,
-      candidates: matches.slice(0,5).map(x=>x.a)
-    };
+  function bestAgent(q) {
+    const m=findAgents(q); if(!m.length) return null;
+    const top=m[0],sec=m[1],gap=sec?top.score-sec.score:top.score;
+    const conf=top.exact||m.length===1||top.score>=500||(gap>=150&&top.score>=100)||(top.score>=200&&(!sec||top.score>=sec.score*2));
+    return {name:top.a,confident:conf,all:m.slice(0,5).map(x=>x.a)};
   }
 
-  function matchCats(q) {
-    const cats = ['ACS','CCTV','Email/Voice','Network','Hardware'];
-    const aliases = { acs:['acs','access','biometric','badge'], cctv:['cctv','camera','surveillance'],
-      'email/voice':['email','voice','voip','phone'], network:['network','wifi','lan','internet'],
-      hardware:['hardware','device','laptop','printer','computer'] };
-    return cats.filter(c => {
-      const ck = c.toLowerCase();
-      return q.includes(ck) || (aliases[ck]||[]).some(a=>q.includes(a));
+  // ── Site matching ──────────────────────────────────────────────
+  function findSites(q) {
+    const sites=allSiteNames(); const qn=normStr(q);
+    return sites.filter(s=>{
+      const sn=normStr(s);
+      return qn.includes(sn)||(sn.length>=4&&qn.includes(sn.slice(0,Math.min(6,sn.length))));
     });
   }
 
-  function matchPriorities(q) {
-    return ['P1','P2','P3','P4'].filter(p => q.includes(p.toLowerCase()) ||
-      (p==='P1'&&/critical|urgent/.test(q)) || (p==='P2'&&/\bhigh\b/.test(q)) ||
-      (p==='P3'&&/medium|planned/.test(q))  || (p==='P4'&&/\blow\b/.test(q)));
-  }
-
-  function matchStatuses(q) {
-    const map = { Open:['open'], 'In Progress':['in progress','inprogress','ongoing'],
-      Closed:['closed','done','complete'], Resolved:['resolved'],
-      'On Hold':['on hold','onhold','hold','pending'], Escalated:['escalated','escalation'] };
-    return Object.entries(map).filter(([,v])=>v.some(x=>q.includes(x))).map(([k])=>k);
-  }
-
-  // ── Format helpers ────────────────────────────────────────────────
-  function pct(n,d){ return d>0?Math.round(n/d*100)+'%':'0%'; }
-  function bold(t){ return `**${t}**`; }
-  function num(n)  { return n.toLocaleString(); }
-
-  function siteTable(entries, cols) {
-    // entries: [{site, ...cols}], cols: [{key,label}]
-    if(!entries.length) return '_No data found._';
-    return entries.map((e,i) => {
-      const rank = i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}.`;
-      const vals = cols.map(c=>`${c.label}: ${bold(e[c.key])}`).join(' · ');
-      return `${rank} **${e.site}** — ${vals}`;
-    }).join('\n');
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // INTENT DETECTION + ANSWER GENERATION
-  // ═══════════════════════════════════════════════════════════════
-
-  const period = detectPeriod(ql);
-  const filtered = period ? periodFilter(src, period) : src;
-  const pLabel   = period ? `(${period})` : '(all time)';
-
-  // ── 4a. SPECIFIC AGENT LOOKUP ────────────────────────────────────
-  const agentMatch = bestMatchAgent(ql);
-  const specificAgent = agentMatch.agent;
-
-  // If we found candidates but aren't confident — ask for clarification
-  // ── Ambiguous match — show candidates ──────────────────────────
-  if(specificAgent && !agentMatch.confident && agentMatch.candidates.length > 1) {
-    return `I found multiple agents matching that name. Did you mean:\n\n`+
-      agentMatch.candidates.map((c,i)=>`${i+1}. **${c}**`).join('\n')+
-      `\n\nType their full name or last name to get their ticket details.`;
-  }
-
-  // ── Confident agent match — ALWAYS show full profile ─────────────
-  // Fires regardless of whether action keywords are present
-  function agentProfile(agentName, period, filtLabel) {
-    const agT  = src.filter(t=>t.agent===agentName);
-    if(!agT.length) return `No tickets found for **${agentName}**.`;
-
-    const open   = agT.filter(t=>['Open','In Progress'].includes(t.st));
-    const inProg = agT.filter(t=>t.st==='In Progress');
-    const onHold = agT.filter(t=>t.st==='On Hold');
-    const closed = agT.filter(t=>t.st==='Closed');
-    const resolved=agT.filter(t=>t.st==='Resolved');
-    const slaB   = agT.filter(t=>t.slaBreached);
-    const p1     = agT.filter(t=>t.pri==='P1');
-    const aged30 = open.filter(t=>ageDays(t)>=30);
-    const thisM  = agT.filter(t=>t.created>=monthStart);
-    const lastM  = agT.filter(t=>t.created>=lastMonthS && t.created<=lastMonthE);
-
-    const catC={}, siteC={}, priC={};
-    agT.forEach(t=>{
-      catC[t.cat]   =(catC[t.cat]||0)+1;
-      siteC[t.site] =(siteC[t.site]||0)+1;
-      priC[t.pri]   =(priC[t.pri]||0)+1;
+  // ── Category + techgroup matching (fully dynamic) ──────────────
+  function findCats(q) {
+    const cats=allCatNames(); const qn=normStr(q);
+    return cats.filter(c=>{
+      const cn=normStr(c);
+      if(qn.includes(cn)) return true;
+      const tokens=cn.split(' ').filter(t=>t.length>=3);
+      return tokens.length>0&&tokens.every(t=>qn.includes(t));
     });
-    const topCats  = Object.entries(catC).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([c,n])=>`${c} (${n})`).join(', ');
-    const topSites = Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([s,n])=>`${s} (${n})`).join(', ');
-    const priBreak = ['P1','P2','P3','P4'].map(p=>`${p}: ${priC[p]||0}`).join(' · ');
+  }
 
-    const filtT = period ? periodFilter(agT, period) : null;
+  function findTechgroups(q) {
+    const tgs=allTechgroups(); const qn=normStr(q);
+    const matched = new Set();
 
+    // Direct match against live techgroup values
+    for(const tg of tgs){
+      const tn=normStr(tg);
+      if(qn.includes(tn)){matched.add(tg);continue;}
+      const tokens=tn.split(' ').filter(t=>t.length>=3);
+      if(tokens.length>0&&tokens.every(t=>qn.includes(t))){matched.add(tg);}
+    }
+
+    // Alias-based matching
+    for(const [alias,patterns] of Object.entries(TG_ALIASES)){
+      if(!qn.includes(alias)) continue;
+      for(const tg of tgs){
+        const tn=normStr(tg).toLowerCase();
+        if(patterns.some(p=>tn.includes(p.toLowerCase()))){matched.add(tg);}
+      }
+    }
+
+    return [...matched];
+  }
+
+  // Also match subcategory field (cf_2583) for richer queries
+  function findSubCats(q) {
+    const qn = normStr(q);
+    const subs = [...new Set(src.map(t=>t.raw?.cf_2583||'').filter(Boolean))];
+    return subs.filter(s=>{
+      const sn=normStr(s);
+      if(qn.includes(sn)) return true;
+      const tokens=sn.split(' ').filter(t=>t.length>=3);
+      return tokens.length>0&&tokens.every(t=>qn.includes(t));
+    });
+  }
+
+  // ── Priority matching ──────────────────────────────────────────
+  function findPriorities(q) {
+    return ['P1','P2','P3','P4'].filter(p=>
+      q.includes(p.toLowerCase())||
+      (p==='P1'&&/\bcritical\b|\burgent\b/.test(q))||
+      (p==='P2'&&/\bhigh\b/.test(q))||
+      (p==='P3'&&/\bmedium\b|\bplanned\b/.test(q))||
+      (p==='P4'&&/\blow\b/.test(q)));
+  }
+
+  // ── Status matching ────────────────────────────────────────────
+  function findStatuses(q) {
+    if(/\bopen\b/.test(q)&&!/closed|resolved/.test(q)) return ['Open','In Progress','On Hold'];
+    if(/in progress|inprogress|ongoing/.test(q)) return ['In Progress'];
+    if(/on.?hold|waiting|pending/.test(q)) return ['On Hold'];
+    if(/\bclosed\b/.test(q)) return ['Closed'];
+    if(/\bresolved\b/.test(q)) return ['Resolved'];
+    if(/closed|resolved|done|completed/.test(q)) return ['Closed','Resolved'];
+    if(/escalat/.test(q)) return ['Escalated'];
+    return [];
+  }
+
+  // ── Universal filter builder ───────────────────────────────────
+  function buildPool(q, baseTickets) {
+    const period  = parsePeriod(q);
+    const cats    = findCats(q);
+    const tgs     = findTechgroups(q);
+    const sites   = findSites(q);
+    const pris    = findPriorities(q);
+    const stats   = findStatuses(q);
+    const ageN    = (q.match(/(\d+)\s*days?\s*(?:old|older|aging|aged|past)/)||q.match(/older\s*than\s*(\d+)/)||q.match(/(\d+)\+\s*days?/))?.[1];
+
+    let pool = applyPeriod(baseTickets, period);
+    const subCats = findSubCats(q);
+    if(cats.length)    pool = pool.filter(t=>cats.includes(t.cat)||(subCats.length&&subCats.includes(t.raw?.cf_2583||'')));
+    else if(subCats.length) pool = pool.filter(t=>subCats.includes(t.raw?.cf_2583||''));
+    if(tgs.length)     pool = pool.filter(t=>tgs.includes(t.techgroup));
+    if(sites.length) pool = pool.filter(t=>sites.includes(t.site));
+    if(pris.length)  pool = pool.filter(t=>pris.includes(t.pri));
+    if(stats.length) pool = pool.filter(t=>stats.includes(t.st));
+    if(ageN)         pool = pool.filter(t=>ageDays(t)>=+ageN);
+
+    const activeFilters=[
+      period?period.label:null,
+      cats.length?cats.join(', '):null,
+      subCats.length&&!cats.length?subCats.join(', '):null,
+      tgs.length?tgs.join(', '):null,
+      sites.length?sites.join(', '):null,
+      pris.length?pris.join(', '):null,
+      stats.length?stats.join(', '):null,
+      ageN?ageN+'+ days old':null,
+    ].filter(Boolean);
+
+    return {pool, period, cats, tgs, sites, pris, stats, ageN:ageN?+ageN:null,
+      label:activeFilters.length?activeFilters.join(' · '):'all time',
+      periodLabel:period?period.label:'all time'};
+  }
+
+  // ── Formatting helpers ─────────────────────────────────────────
+  function num(n)    { return (n||0).toLocaleString(); }
+  function pct(n,d)  { return d>0?Math.round(n/Math.max(d,1)*100)+'%':'0%'; }
+  function bold(t)   { return `**${t}**`; }
+  function medal(i)  { return i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}.`; }
+  function rankList(entries, labelKey, valKey, suffix='tickets') {
+    return entries.map(([l,n],i)=>`${medal(i)} **${l}** — ${bold(num(n))} ${suffix}`).join('\n');
+  }
+
+  function agentStats(tickets, label) {
+    const o=tickets.filter(t=>['Open','In Progress'].includes(t.st)).length;
+    const ip=tickets.filter(t=>t.st==='In Progress').length;
+    const oh=tickets.filter(t=>t.st==='On Hold').length;
+    const cl=tickets.filter(t=>t.st==='Closed').length;
+    const rs=tickets.filter(t=>t.st==='Resolved').length;
+    const sb=tickets.filter(t=>t.slaBreached).length;
+    const p1=tickets.filter(t=>t.pri==='P1').length;
+    const a30=tickets.filter(t=>['Open','In Progress','On Hold'].includes(t.st)&&ageDays(t)>=30).length;
+    const cats={},sites={},pris={};
+    tickets.forEach(t=>{cats[t.cat]=(cats[t.cat]||0)+1;sites[t.site]=(sites[t.site]||0)+1;pris[t.pri]=(pris[t.pri]||0)+1;});
+    const topCats=Object.entries(cats).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([c,n])=>`${c} (${n})`).join(', ');
+    const topSites=Object.entries(sites).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([s,n])=>`${s} (${n})`).join(', ');
+    const priBreak=['P1','P2','P3','P4'].map(p=>`${p}: ${pris[p]||0}`).join(' · ');
+    return {total:tickets.length,open:o,inProg:ip,onHold:oh,closed:cl,resolved:rs,slaB:sb,p1,aged30:a30,topCats,topSites,priBreak};
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // INTENT HANDLERS — ordered from most specific to most general
+  // ═══════════════════════════════════════════════════════════════
+
+  // ── 0. META: list agents / list sites / list categories ────────
+  if(/list.*(all\s*)?(agent|staff|employee|engineer|assignee)|who.*work.*here|show.*all.*agent/.test(ql)) {
+    const agents=allAgentNames().sort();
+    return `## All Agents (${agents.length} total)\n\n`+agents.map((a,i)=>`${i+1}. ${a}`).join('\n')+
+      `\n\n_Type any name — full name, last name, or first name — to get their ticket details._`;
+  }
+  if(/list.*(all\s*)?(site|location)|show.*all.*site/.test(ql)) {
+    const sites=allSiteNames().sort();
+    return `## All Sites (${sites.length} total)\n\n`+sites.map((s,i)=>`${i+1}. ${s}`).join('\n');
+  }
+  if(/list.*(all\s*)?(categor|type|department|dept|techgroup)|show.*all.*cat|all.*department/.test(ql)) {
+    const cats  = allCatNames().filter(c=>!_searchIndex.subcats.includes(c)).sort();
+    const subs  = _searchIndex.subcats.sort();
+    const tgs   = allTechgroups().sort();
+    return `## Tech Groups / Departments (${tgs.length})\n\n`+
+      tgs.map((t,i)=>`${i+1}. **${t}**`).join('\n')+
+      `\n\n## Ticket Categories (${cats.length})\n\n`+
+      cats.map((c,i)=>`${i+1}. ${c}`).join('\n')+
+      (subs.length?`\n\n## Sub-Categories / Services (${subs.length})\n\n`+subs.map((s,i)=>`${i+1}. ${s}`).join('\n'):'');
+  }
+  // Score debug
+  if(/^score\s+/.test(ql)) {
+    const testQ=ql.replace(/^score\s+/,'');
+    const r=findAgents(testQ);
+    return r.length?`**Score debug: "${testQ}"**\n\n`+r.map(x=>`- ${x.a}: **${x.score}**${x.exact?' (exact)':''}`).join('\n')
+      :`No agents scored for "${testQ}"`;
+  }
+
+  // ── 1. AGENT LOOKUP — always try agent first ───────────────────
+  const agentMatch = bestAgent(ql);
+
+  // Ambiguous agent
+  if(agentMatch && !agentMatch.confident && agentMatch.all.length>1) {
+    return `Multiple agents match. Did you mean:\n\n`+
+      agentMatch.all.map((a,i)=>`${i+1}. **${a}**`).join('\n')+
+      `\n\nUse their full name or last name to be specific.`;
+  }
+
+  if(agentMatch && agentMatch.confident) {
+    const name   = agentMatch.name;
+    const allAgT = src.filter(t=>t.agent===name);
+    if(!allAgT.length) return `No tickets found for **${name}**.`;
+
+    const {pool,period,cats,tgs,sites,pris,stats,ageN,label,periodLabel:pl} = buildPool(ql, allAgT);
+
+    // Specific sub-type requested?
+    const wantSLA  = /sla|violat|breach|overdue/.test(ql);
+    const wantOpen = /\bopen\b|\bactive\b/.test(ql)&&!/closed|resolved/.test(ql);
+    const wantClosed=/\bclosed\b|\bresolved\b|\bdone\b/.test(ql);
+    const wantP1   = /\bp1\b|\bcritical\b/.test(ql);
+    const wantHold = /on.?hold|\bhold\b|\bwaiting\b/.test(ql);
+    const wantAged = ageN!==null;
+    const wantList = /list|show|display|give me all|all ticket/.test(ql)&&!wantSLA&&!wantP1;
+
+    const s = agentStats(pool, pl);
+    const heading = `## 👤 ${name} — ${pl}`;
+    const subNote = pool.length!==allAgT.length?`_${num(pool.length)} of ${num(allAgT.length)} all-time tickets match filter: ${label}_\n\n`:'';
+
+    if(wantSLA) {
+      const sl=pool.filter(t=>t.slaBreached);
+      if(!sl.length) return `${heading}\n\n${subNote}✅ No SLA-breached tickets.`;
+      return `${heading}\n\n${subNote}🔴 **${num(sl.length)} SLA-breached tickets:**\n\n`+
+        sl.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | ${t.cat} | Age: ${ageDays(t)}d | ${(t.title||'').slice(0,50)}`).join('\n')+
+        (sl.length>20?`\n\n_…and ${sl.length-20} more_`:'');
+    }
+    if(wantP1) {
+      const p1t=pool.filter(t=>t.pri==='P1'&&['Open','In Progress','On Hold'].includes(t.st));
+      if(!p1t.length) return `${heading}\n\n${subNote}✅ No active P1 tickets.`;
+      return `${heading}\n\n${subNote}⚡ **${num(p1t.length)} active P1 tickets:**\n\n`+
+        p1t.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | Age: ${ageDays(t)}d | ${(t.title||'').slice(0,50)}`).join('\n');
+    }
+    if(wantHold) {
+      const ht=pool.filter(t=>t.st==='On Hold');
+      if(!ht.length) return `${heading}\n\n${subNote}✅ No on-hold tickets.`;
+      return `${heading}\n\n${subNote}⏸ **${num(ht.length)} on-hold tickets:**\n\n`+
+        ht.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.pri} | Age: ${ageDays(t)}d | ${(t.title||'').slice(0,50)}`).join('\n');
+    }
+    if(wantAged) {
+      const at=pool.filter(t=>['Open','In Progress','On Hold'].includes(t.st)&&ageDays(t)>=ageN);
+      if(!at.length) return `${heading}\n\n${subNote}✅ No open tickets older than ${ageN} days.`;
+      return `${heading}\n\n${subNote}⏳ **${num(at.length)} tickets older than ${ageN} days:**\n\n`+
+        at.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | Age: **${ageDays(t)}d** | ${(t.title||'').slice(0,50)}`).join('\n');
+    }
+    if(wantOpen) {
+      const ot=pool.filter(t=>['Open','In Progress','On Hold'].includes(t.st));
+      if(!ot.length) return `${heading}\n\n${subNote}✅ No open tickets.`;
+      return `${heading}\n\n${subNote}🟡 **${num(ot.length)} open tickets:**\n\n`+
+        ot.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | ${t.pri} | Age: ${ageDays(t)}d | ${(t.title||'').slice(0,50)}`).join('\n')+
+        (ot.length>20?`\n\n_…and ${ot.length-20} more_`:'');
+    }
+    if(wantClosed) {
+      const ct=pool.filter(t=>['Closed','Resolved'].includes(t.st));
+      return `${heading}\n\n${subNote}✅ **${num(ct.length)} closed/resolved tickets** in ${pl}\n\n`+
+        `- Closed: ${num(pool.filter(t=>t.st==='Closed').length)}\n- Resolved: ${num(pool.filter(t=>t.st==='Resolved').length)}`;
+    }
+    if(wantList&&pool.length<=30) {
+      return `${heading}\n\n${subNote}**${num(pool.length)} tickets:**\n\n`+
+        pool.slice(0,30).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | ${t.pri} | ${t.cat} | Age: ${ageDays(t)}d | ${(t.title||'').slice(0,50)}`).join('\n');
+    }
+
+    // Full profile (default)
+    const thisM=allAgT.filter(t=>t.created>=monthStart);
+    const lastM=allAgT.filter(t=>t.created>=lastMonthS&&t.created<=lastMonthE);
     return [
-      `## 👤 ${agentName}`,
-      ``,
+      heading, subNote,
       `| Status | Count |`,
       `|--------|-------|`,
-      `| 🟡 Open/Active | ${num(open.length)} |`,
-      `| 🔵 In Progress | ${num(inProg.length)} |`,
-      `| ⏸ On Hold | ${num(onHold.length)} |`,
-      `| ✅ Closed | ${num(closed.length)} |`,
-      `| ✔ Resolved | ${num(resolved.length)} |`,
-      `| 🔴 SLA Breached | ${num(slaB.length)} (${pct(slaB.length,agT.length)}) |`,
-      `| ⚡ P1 Critical | ${num(p1.length)} |`,
-      `| ⏳ Open 30+ days | ${num(aged30.length)} |`,
-      `| **Total (all time)** | **${num(agT.length)}** |`,
+      `| 🟡 Open/Active | ${num(s.open)} |`,
+      `| 🔵 In Progress | ${num(s.inProg)} |`,
+      `| ⏸ On Hold | ${num(s.onHold)} |`,
+      `| ✅ Closed | ${num(s.closed)} |`,
+      `| ✔ Resolved | ${num(s.resolved)} |`,
+      `| 🔴 SLA Breached | ${num(s.slaB)} (${pct(s.slaB,pool.length)}) |`,
+      `| ⚡ P1 Critical | ${num(s.p1)} |`,
+      `| ⏳ Open 30+ days | ${num(s.aged30)} |`,
+      `| **Total** | **${num(pool.length)}** |`,
       ``,
-      `**This month:** ${num(thisM.length)} · **Last month:** ${num(lastM.length)}`,
-      `**Priority mix:** ${priBreak}`,
-      `**Top categories:** ${topCats||'—'}`,
-      `**Top sites:** ${topSites||'—'}`,
-      filtT ? `\n_Showing ${filtLabel}: **${filtT.length}** of ${agT.length} tickets_` : '',
-    ].filter(s=>s!==null&&s!==undefined&&s!=='').join('\n');
+      period?'':`**This month:** ${num(thisM.length)} · **Last month:** ${num(lastM.length)}`,
+      `**Priority mix:** ${s.priBreak}`,
+      `**Top categories:** ${s.topCats||'—'}`,
+      `**Top sites:** ${s.topSites||'—'}`,
+    ].filter(s=>s!==null&&s!==undefined).join('\n');
   }
 
-  if(specificAgent && agentMatch.confident) {
-    const agT = src.filter(t=>t.agent===specificAgent);
-    if(!agT.length) return `No tickets found for **${specificAgent}**.`;
-
-    // Detect filter intent from query
-    const wantsSLA    = /sla|violat|breach|overdue/.test(ql);
-    const wantsOpen   = /\bopen\b|\bactive\b|\bpending\b/.test(ql) && !/closed|resolved/.test(ql);
-    const wantsClosed = /\bclosed\b|\bresolved\b|\bdone\b/.test(ql);
-    const wantsP1     = /\bp1\b|\bcritical\b|\burgent\b/.test(ql);
-    const wantsOnHold = /on hold|\bhold\b|\bwaiting\b/.test(ql);
-    const wantsAged   = /old|aging|aged|stale|30 day|60 day|90 day/.test(ql);
-    const ageMatch    = ql.match(/(\d+)\s*days?/);
-    const ageDaysFilter = ageMatch ? parseInt(ageMatch[1]) : 30;
-
-    // If query asks specifically about SLA/violated tickets for this agent
-    if(wantsSLA) {
-      const slaT = agT.filter(t=>t.slaBreached);
-      if(!slaT.length) return `✅ **${specificAgent}** has no SLA-breached tickets.`;
-      const rows = slaT.slice(0,15).map(t=>
-        `- **${t.id}** | ${t.site} | ${t.st} | ${t.cat} | Age: ${ageDays(t)}d | ${t.title?.slice(0,45)||'—'}`
-      );
-      return `## 🔴 SLA Violated Tickets — ${specificAgent}\n\n`+
-        `**${num(slaT.length)}** SLA-breached ticket${slaT.length!==1?'s':''} assigned to this agent:\n\n`+
-        rows.join('\n')+(slaT.length>15?`
-
-_…and ${slaT.length-15} more_`:'')+
-        `\n\n_${specificAgent} total: ${num(agT.length)} tickets · SLA breach rate: ${pct(slaT.length,agT.length)}_`;
+  // ── 2. COMPARISON ──────────────────────────────────────────────
+  if(/\bvs\.?\b|\bversus\b|\bcompare\b|\bcompared\b/.test(ql)) {
+    // Two agents
+    const agents = findAgents(ql);
+    if(agents.length>=2) {
+      const [a1,a2]=[agents[0].a,agents[1].a];
+      const f1=buildPool(ql,src.filter(t=>t.agent===a1));
+      const f2=buildPool(ql,src.filter(t=>t.agent===a2));
+      const s1=agentStats(f1.pool,a1), s2=agentStats(f2.pool,a2);
+      const w=(k)=>s1[k]>s2[k]?`↑ ${a1}`:s1[k]<s2[k]?`↑ ${a2}`:'Tied';
+      return `## ${a1} vs ${a2} (${f1.periodLabel})\n\n`+
+        `| Metric | ${a1} | ${a2} | Higher |\n|---|---|---|---|\n`+
+        `| Total | ${num(s1.total)} | ${num(s2.total)} | ${w('total')} |\n`+
+        `| Open | ${num(s1.open)} | ${num(s2.open)} | ${w('open')} |\n`+
+        `| Closed/Resolved | ${num(s1.closed+s1.resolved)} | ${num(s2.closed+s2.resolved)} | — |\n`+
+        `| SLA Breached | ${num(s1.slaB)} | ${num(s2.slaB)} | ${s1.slaB<s2.slaB?'↑ '+a1+' better':'↑ '+a2+' better'} |\n`+
+        `| P1 | ${num(s1.p1)} | ${num(s2.p1)} | — |`;
     }
-
-    // P1 tickets for this agent
-    if(wantsP1) {
-      const p1T = agT.filter(t=>t.pri==='P1' && ['Open','In Progress','On Hold'].includes(t.st));
-      if(!p1T.length) return `✅ **${specificAgent}** has no active P1 tickets.`;
-      const rows = p1T.slice(0,15).map(t=>
-        `- **${t.id}** | ${t.site} | ${t.st} | Age: ${ageDays(t)}d | ${t.title?.slice(0,45)||'—'}`
-      );
-      return `## ⚡ Active P1 Tickets — ${specificAgent}\n\n`+
-        `**${num(p1T.length)}** P1 ticket${p1T.length!==1?'s':''}:\n\n`+
-        rows.join('\n');
-    }
-
-    // On hold tickets for this agent
-    if(wantsOnHold) {
-      const holdT = agT.filter(t=>t.st==='On Hold');
-      if(!holdT.length) return `✅ **${specificAgent}** has no tickets on hold.`;
-      const rows = holdT.slice(0,15).map(t=>
-        `- **${t.id}** | ${t.site} | ${t.pri} | Age: ${ageDays(t)}d | ${t.title?.slice(0,45)||'—'}`
-      );
-      return `## ⏸ On Hold Tickets — ${specificAgent}\n\n`+rows.join('\n');
-    }
-
-    // Closed/resolved tickets for this agent
-    if(wantsClosed) {
-      const doneT = agT.filter(t=>['Closed','Resolved'].includes(t.st));
-      if(!doneT.length) return `No closed/resolved tickets found for **${specificAgent}**.`;
-      const thisM = doneT.filter(t=>t.created>=monthStart);
-      return `## ✅ Closed/Resolved — ${specificAgent}\n\n`+
-        `- **Total closed/resolved:** ${num(doneT.length)}\n`+
-        `- **This month:** ${num(thisM.length)}\n`+
-        `- **Closed:** ${num(agT.filter(t=>t.st==='Closed').length)} · **Resolved:** ${num(agT.filter(t=>t.st==='Resolved').length)}`;
-    }
-
-    // Aging tickets for this agent
-    if(wantsAged) {
-      const agedT = agT.filter(t=>['Open','In Progress','On Hold'].includes(t.st) && ageDays(t)>=ageDaysFilter);
-      if(!agedT.length) return `✅ **${specificAgent}** has no open tickets older than ${ageDaysFilter} days.`;
-      const rows = agedT.slice(0,15).map(t=>
-        `- **${t.id}** | ${t.site} | ${t.st} | Age: **${ageDays(t)}d** | ${t.title?.slice(0,45)||'—'}`
-      );
-      return `## ⏳ Tickets Older Than ${ageDaysFilter} Days — ${specificAgent}\n\n`+
-        `**${num(agedT.length)}** ticket${agedT.length!==1?'s':''}:\n\n`+rows.join('\n');
-    }
-
-    // If query asks about open tickets for this agent
-    if(wantsOpen) {
-      const openT = agT.filter(t=>['Open','In Progress','On Hold'].includes(t.st));
-      if(!openT.length) return `✅ **${specificAgent}** has no open tickets.`;
-      const rows = openT.slice(0,15).map(t=>
-        `- **${t.id}** | ${t.site} | ${t.st} | ${t.pri} | Age: ${ageDays(t)}d | ${t.title?.slice(0,45)||'—'}`
-      );
-      return `## 🟡 Open Tickets — ${specificAgent}\n\n`+
-        `**${num(openT.length)}** open ticket${openT.length!==1?'s':''}:\n\n`+
-        rows.join('\n')+(openT.length>15?`\n\n_…and ${openT.length-15} more_`:'');
-    }
-
-    // Default: full profile
-    return agentProfile(specificAgent, period, period||'all time');
-  }
-
-  // ── 1. COMPARE TWO SITES ─────────────────────────────────────────
-  if(/compar|vs\.?|versus/.test(ql)) {
-    const sites = matchSites(ql);
-    if(sites.length >= 2) {
-      const [sA, sB] = sites;
-      const tA = filtered.filter(t=>t.site===sA);
-      const tB = filtered.filter(t=>t.site===sB);
-      const stats = (tickets, name) => {
-        const open     = tickets.filter(t=>['Open','In Progress'].includes(t.st)).length;
-        const closed   = tickets.filter(t=>['Closed','Resolved'].includes(t.st)).length;
-        const slaB     = tickets.filter(t=>t.slaBreached).length;
-        const p1       = tickets.filter(t=>t.pri==='P1').length;
-        const unassign = tickets.filter(t=>!t.agent||t.agent==='Unassigned').length;
-        return {name, total:tickets.length, open, closed, slaB, p1, unassign};
+    // Two sites
+    const sites=findSites(ql);
+    if(sites.length>=2) {
+      const [s1n,s2n]=[sites[0],sites[1]];
+      const {pool:p1}=buildPool(ql,src.filter(t=>t.site===s1n));
+      const {pool:p2}=buildPool(ql,src.filter(t=>t.site===s2n));
+      const {periodLabel:pl}=buildPool(ql,src);
+      const stat=(p,n)=>{
+        const o=p.filter(t=>['Open','In Progress'].includes(t.st)).length;
+        const cl=p.filter(t=>['Closed','Resolved'].includes(t.st)).length;
+        const sb=p.filter(t=>t.slaBreached).length;
+        return {total:p.length,o,cl,sb};
       };
-      const a = stats(tA, sA), b = stats(tB, sB);
-      const winner = (key) => a[key]>b[key] ? `↑ **${sA}** higher` : a[key]<b[key] ? `↑ **${sB}** higher` : 'Tied';
-      return [
-        `## ${sA} vs ${sB} ${pLabel}`,
-        ``,
-        `| Metric | ${sA} | ${sB} | Higher |`,
-        `|--------|-------|-------|--------|`,
-        `| Total Tickets | ${num(a.total)} | ${num(b.total)} | ${winner('total')} |`,
-        `| Open/Active | ${num(a.open)} | ${num(b.open)} | ${winner('open')} |`,
-        `| Closed/Resolved | ${num(a.closed)} | ${num(b.closed)} | — |`,
-        `| SLA Breached | ${num(a.slaB)} (${pct(a.slaB,a.total)}) | ${num(b.slaB)} (${pct(b.slaB,b.total)}) | ${a.slaB<b.slaB?'↑ '+sA+' better':'↑ '+sB+' better'} |`,
-        `| P1 Critical | ${num(a.p1)} | ${num(b.p1)} | — |`,
-        `| Unassigned | ${num(a.unassign)} | ${num(b.unassign)} | — |`,
-      ].join('\n');
+      const a=stat(p1,s1n),b=stat(p2,s2n);
+      const w=(ak,bk)=>a[ak]>b[bk]?`↑ ${s1n}`:a[ak]<b[bk]?`↑ ${s2n}`:'Tied';
+      return `## ${s1n} vs ${s2n} (${pl})\n\n`+
+        `| Metric | ${s1n} | ${s2n} |\n|---|---|---|\n`+
+        `| Total | ${num(a.total)} | ${num(b.total)} |\n`+
+        `| Open | ${num(a.o)} | ${num(b.o)} |\n`+
+        `| Closed | ${num(a.cl)} | ${num(b.cl)} |\n`+
+        `| SLA Breached | ${num(a.sb)} (${pct(a.sb,a.total)}) | ${num(b.sb)} (${pct(b.sb,b.total)}) |`;
     }
-
-    // Compare this month vs last month
+    // Month vs month
     if(/month/.test(ql)) {
-      const cur  = src.filter(t=>t.created>=monthStart);
-      const prev = src.filter(t=>t.created>=lastMonthS && t.created<=lastMonthE);
-      const curLabel  = now.toLocaleDateString('en-US',{month:'long'});
-      const prevLabel = lastMonthS.toLocaleDateString('en-US',{month:'long'});
-      const diff  = cur.length - prev.length;
-      const arrow = diff>0?'📈':'📉';
-      return [
-        `## ${curLabel} vs ${prevLabel}`,
-        ``,
-        `- **${curLabel}:** ${num(cur.length)} tickets`,
-        `- **${prevLabel}:** ${num(prev.length)} tickets`,
-        `- **Change:** ${arrow} ${diff>0?'+':''}${num(diff)} (${pct(Math.abs(diff),Math.max(prev.length,1))})`,
-        ``,
-        `**This month breakdown:** Open ${cur.filter(t=>['Open','In Progress'].includes(t.st)).length} · Closed ${cur.filter(t=>['Closed','Resolved'].includes(t.st)).length} · SLA Breached ${cur.filter(t=>t.slaBreached).length}`,
-        `**Last month breakdown:** Open ${prev.filter(t=>['Open','In Progress'].includes(t.st)).length} · Closed ${prev.filter(t=>['Closed','Resolved'].includes(t.st)).length} · SLA Breached ${prev.filter(t=>t.slaBreached).length}`,
-      ].join('\n');
+      const cur=src.filter(t=>t.created>=monthStart);
+      const prev=src.filter(t=>t.created>=lastMonthS&&t.created<=lastMonthE);
+      const cn=MONTH_NAMES[now.getMonth()], pn=MONTH_NAMES[lastMonthS.getMonth()];
+      const diff=cur.length-prev.length, arrow=diff>0?'📈':'📉';
+      return `## ${cn} vs ${pn}\n\n`+
+        `- **${cn}:** ${num(cur.length)} tickets\n- **${pn}:** ${num(prev.length)} tickets\n`+
+        `- **Change:** ${arrow} ${diff>0?'+':''}${num(diff)} (${pct(Math.abs(diff),Math.max(prev.length,1))})\n\n`+
+        `**${cn}:** Open ${cur.filter(t=>['Open','In Progress'].includes(t.st)).length} · Closed ${cur.filter(t=>['Closed','Resolved'].includes(t.st)).length} · SLA Breached ${cur.filter(t=>t.slaBreached).length}\n`+
+        `**${pn}:** Open ${prev.filter(t=>['Open','In Progress'].includes(t.st)).length} · Closed ${prev.filter(t=>['Closed','Resolved'].includes(t.st)).length} · SLA Breached ${prev.filter(t=>t.slaBreached).length}`;
     }
   }
 
-  // ── 2. SLA VIOLATIONS / BREACHES ────────────────────────────────
-  if(/sla|violat|breach|overdue/.test(ql)) {
-    const slaT = filtered.filter(t=>t.slaBreached);
-    const sites = matchSites(ql);
+  // ── 3. RANKING — who/which has most/least ─────────────────────
+  if(/\bmost\b|\btop\b|\bworst\b|\bbest\b|\bhighest\b|\blowest\b|\branking\b|\brank\b|\bwho has\b|\bwhich site\b|\bwhich agent\b|\bwho is\b|\bwho handles\b/.test(ql)) {
+    const {pool,label,periodLabel:pl,cats,tgs,sites:filterSites}=buildPool(ql,src);
+    const N=parseInt(ql.match(/top\s*(\d+)/)?.[1]||'10');
+    const wantOpen=/open|active/.test(ql)&&!/closed/.test(ql);
+    const wantSLA=/sla|violat|breach/.test(ql);
+    const wantClosed=/closed|resolved|done/.test(ql)&&!/open/.test(ql);
+    const wantUnassigned=/unassign/.test(ql);
+    const byAgent=/who|agent|person|engineer|staff|employee|assignee|assigned/.test(ql);
+    const bySite=/which site|site.*most|most.*site|per site|by site/.test(ql)||(!byAgent&&filterSites.length===0);
 
-    if(sites.length===1) {
-      const st = slaT.filter(t=>t.site===sites[0]);
-      return `**${sites[0]}** has **${num(st.length)}** SLA-breached tickets ${pLabel}.\n\n`+
-        `- Open/Active breaches: ${st.filter(t=>['Open','In Progress'].includes(t.st)).length}\n`+
-        `- On Hold breaches: ${st.filter(t=>t.st==='On Hold').length}\n`+
-        `- Total site tickets: ${num(filtered.filter(t=>t.site===sites[0]).length)}\n`+
-        `- SLA breach rate: ${pct(st.length, filtered.filter(t=>t.site===sites[0]).length)}`;
-    }
+    let subset=pool;
+    if(wantOpen)       subset=pool.filter(t=>['Open','In Progress','On Hold'].includes(t.st));
+    if(wantClosed)     subset=pool.filter(t=>['Closed','Resolved'].includes(t.st));
+    if(wantSLA)        subset=pool.filter(t=>t.slaBreached);
+    if(wantUnassigned) subset=pool.filter(t=>!t.agent||t.agent==='Unassigned');
 
-    // Rank all sites by SLA breaches
-    const siteB = {};
-    slaT.forEach(t=>{ siteB[t.site]=(siteB[t.site]||0)+1; });
-    const ranked = Object.entries(siteB).sort((a,b)=>b[1]-a[1]).slice(0,8);
-    return `## Most SLA Violations ${pLabel}\n\n`+
-      ranked.map((([s,n],i)=>`${i===0?'🔴':i===1?'🟠':i===2?'🟡':'⚪'} **${s}** — ${bold(num(n))} breaches`)).join('\n')+
-      `\n\n**Total breaches:** ${num(slaT.length)} of ${num(filtered.length)} tickets (${pct(slaT.length,filtered.length)})`;
+    const groupKey = byAgent&&!bySite ? t=>t.agent : t=>t.site;
+    const groupC={};
+    subset.filter(t=>groupKey(t)&&groupKey(t)!=='Unassigned').forEach(t=>{ const k=groupKey(t); groupC[k]=(groupC[k]||0)+1; });
+    const ranked=Object.entries(groupC).sort((a,b)=>b[1]-a[1]).slice(0,N);
+
+    if(!ranked.length) return `No ${wantOpen?'open ':wantSLA?'SLA-breached ':wantClosed?'closed ':''}tickets found for filter: ${label}`;
+
+    const typeLabel=wantOpen?'open tickets':wantSLA?'SLA violations':wantClosed?'closed/resolved tickets':wantUnassigned?'unassigned tickets':'tickets';
+    const groupLabel=byAgent&&!bySite?'Agent':'Site';
+    const ctx=label!=='all time'?`(${label})`:'';
+
+    return `## 🏆 Most ${typeLabel.charAt(0).toUpperCase()+typeLabel.slice(1)} by ${groupLabel} ${ctx}\n\n`+
+      ranked.map(([k,n],i)=>`${medal(i)} **${k}** — ${bold(num(n))} ${typeLabel}`).join('\n')+
+      `\n\n_Total ${typeLabel}: ${num(subset.filter(t=>groupKey(t)&&groupKey(t)!=='Unassigned').length)}_`;
   }
 
-  // ── 0. LIST ALL AGENTS / DEBUG SCORING ──────────────────────────
-  if(/list.*agent|show.*agent|all agent|who.*agent|agent.*list|show.*staff|show.*employee|list.*engineer/.test(ql)) {
-    const agents = allAgents().sort();
-    return `## All Agents (${agents.length} total)\n\n`+
-      agents.map((a,i)=>`${i+1}. ${a}`).join('\n')+
-      `\n\n_Type any name to get their full ticket summary._`;
+  // ── 4. SLA / VIOLATIONS ────────────────────────────────────────
+  if(/\bsla\b|\bviolat|\bbreach|\boverdue\b/.test(ql)) {
+    const {pool,label,cats,tgs,sites:fs,periodLabel:pl}=buildPool(ql,src);
+    const slaT=pool.filter(t=>t.slaBreached);
+    const siteC={};
+    slaT.forEach(t=>{ siteC[t.site]=(siteC[t.site]||0)+1; });
+    const ranked=Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,10);
+    if(!slaT.length) return `✅ No SLA-breached tickets found for: ${label}`;
+    return `## 🔴 SLA Violations (${pl})\n\nFilters: ${label}\n\n`+
+      ranked.map(([s,n],i)=>`${i===0?'🔴':i===1?'🟠':i===2?'🟡':'⚪'} **${s}** — ${bold(num(n))} breaches`).join('\n')+
+      `\n\n**Total breaches:** ${num(slaT.length)} of ${num(pool.length)} tickets (${pct(slaT.length,pool.length)})`;
   }
 
-  // debug: "score <name>" — shows how the matcher scores each agent
-  if(/^score /.test(ql)) {
-    const testQ = ql.replace(/^score /,'');
-    const results = matchAgents(testQ);
-    if(!results.length) return `No agents scored >= 40 for "${testQ}".`;
-    return `## Score debug: "${testQ}"\n\n`+
-      results.map(r=>`- **${r.a}** → score: ${r.score}${r.exact?' (exact)':''}`).join('\n');
+  // ── 5. OPEN P1 / CRITICAL ──────────────────────────────────────
+  if(/\bp1\b|\bcritical\b|\burgent\b/.test(ql)&&/\bopen\b|\bactive\b/.test(ql)) {
+    const {pool,label,periodLabel:pl}=buildPool(ql,src);
+    const p1=pool.filter(t=>t.pri==='P1'&&['Open','In Progress','On Hold'].includes(t.st));
+    if(!p1.length) return `✅ No active P1 tickets for: ${label}`;
+    return `## ⚡ Active P1 Tickets (${pl})\n\n**${num(p1.length)} found:**\n\n`+
+      p1.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | ${t.agent||'Unassigned'} | Age: ${ageDays(t)}d | ${(t.title||'').slice(0,50)}`).join('\n')+
+      (p1.length>20?`\n\n_…and ${p1.length-20} more_`:'');
   }
 
-  // ── 3. OPEN P1 TICKETS / PRIORITY FILTER ─────────────────────────
-  if(/p1|critical|urgent/.test(ql) && /open|active/.test(ql)) {
-    const ageDays2 = /older|30|30 days/.test(ql) ? 30 : /90/.test(ql) ? 90 : 0;
-    let p1 = src.filter(t=>t.pri==='P1' && ['Open','In Progress','On Hold'].includes(t.st));
-    if(ageDays2>0) p1 = p1.filter(t=>ageDays(t)>=ageDays2);
-    if(!p1.length) return `✅ No open P1 tickets${ageDays2>0?' older than '+ageDays2+' days':''} found. All P1s are resolved or closed.`;
-    const rows = p1.slice(0,15).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | Age: ${ageDays(t)}d | Agent: ${t.agent||'Unassigned'} | ${t.title?.slice(0,50)||'—'}`);
-    return `## Open P1 Tickets${ageDays2>0?' ('+ageDays2+'+ days)':''} — ${num(p1.length)} found\n\n`+rows.join('\n')+(p1.length>15?`\n\n_…and ${p1.length-15} more_`:'');
-  }
-
-  // ── 4a. [MOVED TO TOP] ────────────────────────────────────
-
-  // ── 4b. WHO IS HANDLING / AGENT QUESTIONS ────────────────────────
-  if(/who|agent|engineer|handling|assigned|assignee/.test(ql)) {
-    // If a specific agent name was mentioned but without ticket-count intent, show their profile
-    if(specificAgent && agentMatch.confident) {
-      const agT = src.filter(t=>t.agent===specificAgent);
-      const catC = {};
-      agT.forEach(t=>{ catC[t.cat]=(catC[t.cat]||0)+1; });
-      return `**${specificAgent}** has **${num(agT.length)}** tickets assigned (all time).
-`+
-        `- Open: ${agT.filter(t=>['Open','In Progress'].includes(t.st)).length}
-`+
-        `- Closed/Resolved: ${agT.filter(t=>['Closed','Resolved'].includes(t.st)).length}
-`+
-        `- SLA Breached: ${agT.filter(t=>t.slaBreached).length}
-`+
-        `- Top category: ${Object.entries(catC).sort((a,b)=>b[1]-a[1])[0]?.[0]||'—'}`;
-    }
-
-    const cats = matchCats(ql);
-    const sites = matchSites(ql);
-    let pool = filtered;
-    if(cats.length)  pool = pool.filter(t=>cats.includes(t.cat));
-    if(sites.length) pool = pool.filter(t=>sites.includes(t.site));
-
-    const agentC = {};
-    pool.filter(t=>t.agent&&t.agent!=='Unassigned').forEach(t=>{ agentC[t.agent]=(agentC[t.agent]||0)+1; });
-    const ranked = Object.entries(agentC).sort((a,b)=>b[1]-a[1]).slice(0,10);
-    if(!ranked.length) return 'No assigned tickets found for that filter.';
-
-    const context = [...cats,...sites].join(', ') || 'all tickets';
-    return `## Agents Handling ${context} ${pLabel}\n\n`+
-      ranked.map(([n,c],i)=>`${i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}.`} **${n}** — ${bold(num(c))} tickets`).join('\n')+
-      `\n\n**Unassigned:** ${pool.filter(t=>!t.agent||t.agent==='Unassigned').length} tickets`;
-  }
-
-  // ── 5. TICKETS FOR A SPECIFIC SITE ───────────────────────────────
-  if(matchSites(ql).length===1 && !/compar|vs/.test(ql)) {
-    const site = matchSites(ql)[0];
-    const st = filtered.filter(t=>t.site===site);
-    if(!st.length) return `No tickets found for **${site}** ${pLabel}.`;
-    const open   = st.filter(t=>['Open','In Progress'].includes(t.st));
-    const closed = st.filter(t=>['Closed','Resolved'].includes(t.st));
-    const slaB   = st.filter(t=>t.slaBreached);
-    const aged30 = open.filter(t=>ageDays(t)>=30);
-    const catBreak = {};
-    st.forEach(t=>{ catBreak[t.cat]=(catBreak[t.cat]||0)+1; });
-    const topCats = Object.entries(catBreak).sort((a,b)=>b[1]-a[1]).slice(0,4).map(([c,n])=>`${c}: ${n}`).join(', ');
-    const agentC = {};
-    st.filter(t=>t.agent&&t.agent!=='Unassigned').forEach(t=>{ agentC[t.agent]=(agentC[t.agent]||0)+1; });
-    const topAgent = Object.entries(agentC).sort((a,b)=>b[1]-a[1])[0];
+  // ── 6. SPECIFIC SITE ──────────────────────────────────────────
+  const sites=findSites(ql);
+  if(sites.length===1&&!/\bvs\b|\bversus\b/.test(ql)) {
+    const site=sites[0];
+    const {pool,label,periodLabel:pl}=buildPool(ql,src.filter(t=>t.site===site));
+    if(!pool.length) return `No tickets found for **${site}** (${label}).`;
+    const s=agentStats(pool,site);
+    const catBreak={},agC={};
+    pool.forEach(t=>{catBreak[t.cat]=(catBreak[t.cat]||0)+1;if(t.agent&&t.agent!=='Unassigned')agC[t.agent]=(agC[t.agent]||0)+1;});
+    const topCats=Object.entries(catBreak).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([c,n])=>`${c}: ${n}`).join(', ');
+    const topAgent=Object.entries(agC).sort((a,b)=>b[1]-a[1])[0];
     return [
-      `## ${site} ${pLabel}`,
-      ``,
-      `- **Total tickets:** ${num(st.length)}`,
-      `- **Open/Active:** ${num(open.length)} (${pct(open.length,st.length)})`,
-      `- **Closed/Resolved:** ${num(closed.length)} (${pct(closed.length,st.length)})`,
-      `- **SLA Breached:** ${num(slaB.length)} (${pct(slaB.length,st.length)})`,
-      `- **Open 30+ days:** ${num(aged30.length)}`,
-      `- **Top categories:** ${topCats}`,
-      topAgent ? `- **Top agent:** ${topAgent[0]} (${topAgent[1]} tickets)` : '- **Top agent:** Unassigned',
-      `- **Unassigned:** ${st.filter(t=>!t.agent||t.agent==='Unassigned').length}`,
-    ].join('\n');
-  }
-
-  // ── 6. RANKING / TOP / MOST / WORST ──────────────────────────────
-  if(/top|most|worst|highest|lowest|rank|best|which site/.test(ql)) {
-    const N = parseInt(ql.match(/top\s*(\d+)/)?.[1]||'5');
-    const pool = filtered;
-
-    // Most tickets
-    if(/ticket|volume|busy/.test(ql) && !/sla|violation|breach/.test(ql)) {
-      const siteC = {};
-      pool.forEach(t=>{ siteC[t.site]=(siteC[t.site]||0)+1; });
-      const ranked = Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,N);
-      return `## Top ${N} Sites by Ticket Volume ${pLabel}\n\n`+
-        ranked.map(([s,n],i)=>`${i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}.`} **${s}** — ${bold(num(n))} tickets`).join('\n');
-    }
-
-    // Most unassigned
-    if(/unassign/.test(ql)) {
-      const siteC = {};
-      pool.filter(t=>!t.agent||t.agent==='Unassigned').forEach(t=>{ siteC[t.site]=(siteC[t.site]||0)+1; });
-      const ranked = Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,N);
-      return `## Sites with Most Unassigned Tickets ${pLabel}\n\n`+
-        ranked.map(([s,n],i)=>`${i+1}. **${s}** — ${bold(num(n))} unassigned`).join('\n');
-    }
-
-    // Most open
-    if(/open/.test(ql)) {
-      const siteC = {};
-      pool.filter(t=>['Open','In Progress'].includes(t.st)).forEach(t=>{ siteC[t.site]=(siteC[t.site]||0)+1; });
-      const ranked = Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,N);
-      return `## Sites with Most Open Tickets ${pLabel}\n\n`+
-        ranked.map(([s,n],i)=>`${i===0?'🔴':i===1?'🟠':'🟡'} **${s}** — ${bold(num(n))} open`).join('\n');
-    }
-
-    // Best/most resolved
-    if(/resolv|closed|done|best/.test(ql)) {
-      const siteC = {};
-      pool.filter(t=>['Closed','Resolved'].includes(t.st)).forEach(t=>{ siteC[t.site]=(siteC[t.site]||0)+1; });
-      const ranked = Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,N);
-      return `## Sites with Most Closed/Resolved Tickets ${pLabel}\n\n`+
-        ranked.map(([s,n],i)=>`${i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}.`} **${s}** — ${bold(num(n))} closed/resolved`).join('\n');
-    }
-  }
-
-  // ── 7. AGING / OLD TICKETS ───────────────────────────────────────
-  if(/old|aging|aged|stale|days|30|60|90/.test(ql)) {
-    const days = parseInt(ql.match(/(\d+)\s*days?/)?.[1] || ql.match(/\b(30|60|90|180|365)\b/)?.[1] || '30');
-    const openT = src.filter(t=>['Open','In Progress','On Hold'].includes(t.st));
-    const aged  = openT.filter(t=>ageDays(t)>=days);
-    const sites = matchSites(ql);
-
-    if(sites.length===1) {
-      const sa = aged.filter(t=>t.site===sites[0]);
-      return `**${sites[0]}** has **${num(sa.length)}** open tickets older than **${days} days**.\n\n`+
-        sa.slice(0,10).map(t=>`- **${t.id}** | ${t.st} | Age: **${ageDays(t)}d** | ${t.agent||'Unassigned'} | ${t.title?.slice(0,45)||'—'}`).join('\n')+
-        (sa.length>10?`\n_…and ${sa.length-10} more_`:'');
-    }
-
-    const siteC = {};
-    aged.forEach(t=>{ siteC[t.site]=(siteC[t.site]||0)+1; });
-    const ranked = Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,8);
-    return `## Open Tickets Older Than ${days} Days — ${num(aged.length)} total\n\n`+
-      ranked.map(([s,n],i)=>`${i+1}. **${s}** — ${bold(num(n))} tickets`).join('\n')+
-      `\n\n_Oldest ticket: **${Math.max(...aged.map(t=>ageDays(t)))} days** old_`;
-  }
-
-  // ── 8. CATEGORY BREAKDOWN ────────────────────────────────────────
-  if(/categor|acs|cctv|network|hardware|email|voice|type/.test(ql)) {
-    const cats = matchCats(ql);
-    const sites = matchSites(ql);
-    let pool = filtered;
-    if(sites.length) pool = pool.filter(t=>sites.includes(t.site));
-
-    if(cats.length===1) {
-      const ct = pool.filter(t=>t.cat===cats[0]);
-      const siteC = {};
-      ct.forEach(t=>{ siteC[t.site]=(siteC[t.site]||0)+1; });
-      const ranked = Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,8);
-      const agentC = {};
-      ct.filter(t=>t.agent&&t.agent!=='Unassigned').forEach(t=>{ agentC[t.agent]=(agentC[t.agent]||0)+1; });
-      const topAgent = Object.entries(agentC).sort((a,b)=>b[1]-a[1])[0];
-      return [
-        `## ${cats[0]} Tickets ${pLabel}`,
-        ``,
-        `- **Total:** ${num(ct.length)} (${pct(ct.length,pool.length)} of all tickets)`,
-        `- **Open:** ${ct.filter(t=>['Open','In Progress'].includes(t.st)).length}`,
-        `- **Closed/Resolved:** ${ct.filter(t=>['Closed','Resolved'].includes(t.st)).length}`,
-        `- **SLA Breached:** ${ct.filter(t=>t.slaBreached).length}`,
-        topAgent?`- **Top agent:** ${topAgent[0]} (${topAgent[1]} ${cats[0]} tickets)`:'',
-        ``,
-        `**By site (top 8):**`,
-        ranked.map(([s,n],i)=>`${i+1}. **${s}** — ${num(n)}`).join('\n'),
-      ].filter(Boolean).join('\n');
-    }
-
-    // Overall category breakdown
-    const catC = {};
-    pool.forEach(t=>{ catC[t.cat]=(catC[t.cat]||0)+1; });
-    const ranked = Object.entries(catC).sort((a,b)=>b[1]-a[1]);
-    const title = sites.length ? `Category Breakdown — ${sites.join(', ')}` : `Category Breakdown`;
-    return `## ${title} ${pLabel}\n\n`+
-      ranked.map(([c,n],i)=>`${i+1}. **${c}** — ${bold(num(n))} (${pct(n,pool.length)})`).join('\n');
-  }
-
-  // ── 9. UNASSIGNED ────────────────────────────────────────────────
-  if(/unassign|no agent|nobody/.test(ql)) {
-    const ua = filtered.filter(t=>!t.agent||t.agent==='Unassigned');
-    const siteC = {};
-    ua.forEach(t=>{ siteC[t.site]=(siteC[t.site]||0)+1; });
-    const ranked = Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,8);
-    return `## Unassigned Tickets ${pLabel}\n\n`+
-      `**Total unassigned:** ${bold(num(ua.length))} (${pct(ua.length,filtered.length)} of tickets)\n\n`+
-      ranked.map(([s,n],i)=>`${i+1}. **${s}** — ${num(n)} unassigned`).join('\n');
-  }
-
-  // ── 10. STATUS QUESTIONS ─────────────────────────────────────────
-  if(/how many|count|total|number of/.test(ql)) {
-    const statuses = matchStatuses(ql);
-    const sites    = matchSites(ql);
-    const cats     = matchCats(ql);
-    const pris     = matchPriorities(ql);
-
-    let pool = filtered;
-    if(statuses.length) pool = pool.filter(t=>statuses.includes(t.st));
-    if(sites.length)    pool = pool.filter(t=>sites.includes(t.site));
-    if(cats.length)     pool = pool.filter(t=>cats.includes(t.cat));
-    if(pris.length)     pool = pool.filter(t=>pris.includes(t.pri));
-
-    const filters = [...statuses,...sites,...cats,...pris].join(', ')||'all';
-    return `**${num(pool.length)}** tickets match: _${filters}_ ${pLabel}.`+
-      (pool.length>0 ? `\n\n- Open/Active: ${pool.filter(t=>['Open','In Progress'].includes(t.st)).length}\n- Closed/Resolved: ${pool.filter(t=>['Closed','Resolved'].includes(t.st)).length}\n- SLA Breached: ${pool.filter(t=>t.slaBreached).length}` : '');
-  }
-
-  // ── 11. SUMMARY / OVERVIEW ───────────────────────────────────────
-  if(/summar|overview|status|dashboard|health|how are we|how.*doing/.test(ql)) {
-    const open   = src.filter(t=>['Open','In Progress'].includes(t.st)).length;
-    const closed = src.filter(t=>['Closed','Resolved'].includes(t.st)).length;
-    const slaB   = src.filter(t=>t.slaBreached).length;
-    const ua     = src.filter(t=>!t.agent||t.agent==='Unassigned').length;
-    const aged30 = src.filter(t=>['Open','In Progress','On Hold'].includes(t.st)&&ageDays(t)>=30).length;
-    const todayT = src.filter(t=>t.created>=sod).length;
-    const slaComp= Math.max(0,100-Math.round(slaB/src.length*100));
-    return [
-      `## Dashboard Summary — ${new Date().toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}`,``,
-      `- 📋 **Total tickets:** ${num(src.length)}`,
-      `- 🟡 **Open/Active:** ${num(open)} (${pct(open,src.length)})`,
-      `- ✅ **Closed/Resolved:** ${num(closed)} (${pct(closed,src.length)})`,
-      `- 🔴 **SLA Breached:** ${num(slaB)} — Compliance: **${slaComp}%**`,
-      `- 👤 **Unassigned:** ${num(ua)}`,
-      `- ⏳ **Open 30+ days:** ${num(aged30)}`,
-      `- 📅 **Created today:** ${num(todayT)}`,
-      ``,
-      slaComp>=90 ? `✅ **SLA health is good** — above 85% target.` :
-        slaB>50 ? `⚠️ **${slaB} SLA breaches** need attention.` : `📊 SLA compliance at ${slaComp}%.`,
-    ].join('\n');
-  }
-
-  // ── 12. TODAY / THIS WEEK SNAPSHOT ───────────────────────────────
-  if(/today|yesterday|this week|this month/.test(ql) && !/compar/.test(ql)) {
-    const pool = filtered;
-    const open = pool.filter(t=>['Open','In Progress'].includes(t.st)).length;
-    const slaB = pool.filter(t=>t.slaBreached).length;
-    const siteC = {};
-    pool.forEach(t=>{ siteC[t.site]=(siteC[t.site]||0)+1; });
-    const top3 = Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([s,n])=>`**${s}** (${n})`).join(', ');
-    return [
-      `## Tickets ${pLabel}`,``,
+      `## 📍 ${site} — ${pl}`,
       `- **Total:** ${num(pool.length)}`,
-      `- **Open/Active:** ${num(open)}`,
-      `- **Closed/Resolved:** ${num(pool.filter(t=>['Closed','Resolved'].includes(t.st)).length)}`,
-      `- **SLA Breached:** ${num(slaB)}`,
+      `- **Open/Active:** ${num(s.open)} (${pct(s.open,pool.length)})`,
+      `- **Closed/Resolved:** ${num(s.closed+s.resolved)} (${pct(s.closed+s.resolved,pool.length)})`,
+      `- **SLA Breached:** ${num(s.slaB)} (${pct(s.slaB,pool.length)})`,
+      `- **Open 30+ days:** ${num(s.aged30)}`,
+      `- **P1 Critical:** ${num(s.p1)}`,
       `- **Unassigned:** ${num(pool.filter(t=>!t.agent||t.agent==='Unassigned').length)}`,
-      top3 ? `- **Top sites:** ${top3}` : '',
+      `- **Top categories:** ${topCats}`,
+      topAgent?`- **Top agent:** ${topAgent[0]} (${topAgent[1]} tickets)`:'',
     ].filter(Boolean).join('\n');
   }
 
-  // ── FALLBACK — do a best-effort general answer ───────────────────
-  const sites = matchSites(ql);
-  if(sites.length) {
-    const st = filtered.filter(t=>sites.includes(t.site));
-    return `Found **${num(st.length)}** tickets for **${sites.join(', ')}** ${pLabel}.\n\n`+
-      `- Open: ${st.filter(t=>['Open','In Progress'].includes(t.st)).length}\n`+
-      `- Closed/Resolved: ${st.filter(t=>['Closed','Resolved'].includes(t.st)).length}\n`+
-      `- SLA Breached: ${st.filter(t=>t.slaBreached).length}\n`+
-      `- Unassigned: ${st.filter(t=>!t.agent||t.agent==='Unassigned').length}`;
+  // ── 7. AGING / STALE TICKETS ──────────────────────────────────
+  if(/\baging\b|\baged\b|\bold\b|\bstale\b|\bolder than\b|\bdays?\s*old\b|\bno.*updat|\bstuck\b/.test(ql)) {
+    const {pool,label,periodLabel:pl,ageN:an}=buildPool(ql,src);
+    const days=an||30;
+    const openT=pool.filter(t=>['Open','In Progress','On Hold'].includes(t.st)&&ageDays(t)>=days);
+    const siteC={};
+    openT.forEach(t=>{siteC[t.site]=(siteC[t.site]||0)+1;});
+    const ranked=Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,8);
+    if(!openT.length) return `✅ No open tickets older than ${days} days for: ${label}`;
+    const oldest=Math.max(...openT.map(t=>ageDays(t)));
+    return `## ⏳ Open Tickets Older Than ${days} Days (${pl})\n\n**${num(openT.length)} total** · Oldest: **${oldest} days**\n\n`+
+      ranked.map(([s,n],i)=>`${i+1}. **${s}** — ${num(n)} tickets`).join('\n');
   }
 
-  return `I can answer questions about:\n- **Site comparisons** (e.g. "Picadily vs Aeropark")\n- **SLA violations** (e.g. "which site has most SLA breaches this week")\n- **Open P1 tickets** (e.g. "show open P1 tickets older than 30 days")\n- **Agent workload** (e.g. "who is handling the most ACS tickets")\n- **Volume comparisons** (e.g. "this month vs last month")\n- **Aging tickets** (e.g. "open tickets older than 90 days")\n- **Category breakdowns** (e.g. "how many CCTV tickets at Aura")\n\nTry rephrasing your question with a site name, category, or time period.`;
-}
+  // ── 8. CATEGORY / DEPARTMENT BREAKDOWN ────────────────────────
+  if(/categor|department|dept|techgroup|breakdown|by type|per type/.test(ql)||findCats(ql).length||findTechgroups(ql).length) {
+    const {pool,label,cats,tgs,periodLabel:pl}=buildPool(ql,src);
+    const catC={};
+    pool.forEach(t=>{catC[t.cat]=(catC[t.cat]||0)+1;});
+    const ranked=Object.entries(catC).sort((a,b)=>b[1]-a[1]);
+    const ctx=[...cats,...tgs].join(', ')||'all categories';
+    return `## 📂 ${ctx} — ${pl}\n\n`+
+      `**Total: ${num(pool.length)}** · Open: ${pool.filter(t=>['Open','In Progress'].includes(t.st)).length} · SLA Breached: ${pool.filter(t=>t.slaBreached).length}\n\n`+
+      ranked.slice(0,15).map(([c,n],i)=>`${i+1}. **${c}** — ${num(n)} (${pct(n,pool.length)})`).join('\n');
+  }
 
-// ── Send message ─────────────────────────────────────────────────
+  // ── 9. UNASSIGNED ─────────────────────────────────────────────
+  if(/\bunassign|\bno agent|\bnobody assigned|\bnot assigned/.test(ql)) {
+    const {pool,label,periodLabel:pl}=buildPool(ql,src);
+    const ua=pool.filter(t=>!t.agent||t.agent==='Unassigned');
+    const siteC={};
+    ua.forEach(t=>{siteC[t.site]=(siteC[t.site]||0)+1;});
+    const ranked=Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,10);
+    return `## 👤 Unassigned Tickets (${pl})\n\n**${num(ua.length)} unassigned** (${pct(ua.length,pool.length)} of total)\n\n`+
+      ranked.map(([s,n],i)=>`${i+1}. **${s}** — ${num(n)}`).join('\n');
+  }
+
+  // ── 10. SUMMARY / OVERVIEW ────────────────────────────────────
+  if(/\bsummar|\boverview|\bdashboard|\bhow are we\b|\bhow.*doing\b|\bstatus\b|\bhealth\b/.test(ql)) {
+    const {pool,label,periodLabel:pl}=buildPool(ql,src);
+    const o=pool.filter(t=>['Open','In Progress'].includes(t.st)).length;
+    const cl=pool.filter(t=>['Closed','Resolved'].includes(t.st)).length;
+    const sb=pool.filter(t=>t.slaBreached).length;
+    const ua=pool.filter(t=>!t.agent||t.agent==='Unassigned').length;
+    const a30=pool.filter(t=>['Open','In Progress','On Hold'].includes(t.st)&&ageDays(t)>=30).length;
+    const todayT=pool.filter(t=>t.created>=sod).length;
+    const comp=Math.max(0,100-Math.round(sb/Math.max(pool.length,1)*100));
+    return [
+      `## 📊 Dashboard Summary — ${pl}`,``,
+      `- 📋 **Total:** ${num(pool.length)}`,
+      `- 🟡 **Open/Active:** ${num(o)} (${pct(o,pool.length)})`,
+      `- ✅ **Closed/Resolved:** ${num(cl)} (${pct(cl,pool.length)})`,
+      `- 🔴 **SLA Breached:** ${num(sb)} — Compliance: **${comp}%**`,
+      `- 👤 **Unassigned:** ${num(ua)}`,
+      `- ⏳ **Open 30+ days:** ${num(a30)}`,
+      `- 📅 **Created today:** ${num(todayT)}`,``,
+      comp>=90?`✅ SLA health good — above 85% target.`:sb>50?`⚠️ ${num(sb)} SLA breaches need attention.`:`📊 SLA compliance at ${comp}%.`,
+    ].join('\n');
+  }
+
+  // ── 11. GENERIC COUNT / HOW MANY ──────────────────────────────
+  if(/\bhow many\b|\bcount\b|\btotal\b|\bnumber of\b/.test(ql)) {
+    const {pool,label,periodLabel:pl}=buildPool(ql,src);
+    const o=pool.filter(t=>['Open','In Progress'].includes(t.st)).length;
+    const cl=pool.filter(t=>['Closed','Resolved'].includes(t.st)).length;
+    const sb=pool.filter(t=>t.slaBreached).length;
+    return `**${num(pool.length)} tickets** match: _${label}_\n\n`+
+      `- Open/Active: ${num(o)}\n- Closed/Resolved: ${num(cl)}\n- SLA Breached: ${num(sb)}`;
+  }
+
+  // ── 12. SNAPSHOT (today / this week / this month) ─────────────
+  const period=parsePeriod(ql);
+  if(period) {
+    const pool=applyPeriod(src,period);
+    const o=pool.filter(t=>['Open','In Progress'].includes(t.st)).length;
+    const cl=pool.filter(t=>['Closed','Resolved'].includes(t.st)).length;
+    const sb=pool.filter(t=>t.slaBreached).length;
+    const siteC={};
+    pool.forEach(t=>{siteC[t.site]=(siteC[t.site]||0)+1;});
+    const top3=Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([s,n])=>`**${s}** (${n})`).join(', ');
+    return [
+      `## 📅 ${period.label} Snapshot`,
+      `- **Total:** ${num(pool.length)}`,
+      `- **Open/Active:** ${num(o)}`,
+      `- **Closed/Resolved:** ${num(cl)}`,
+      `- **SLA Breached:** ${num(sb)}`,
+      `- **Unassigned:** ${num(pool.filter(t=>!t.agent||t.agent==='Unassigned').length)}`,
+      top3?`- **Top sites:** ${top3}`:'',
+    ].filter(Boolean).join('\n');
+  }
+
+  // ── 13. FALLBACK — apply all filters and return summary ───────
+  const {pool:fp,label:fl,cats:fc,tgs:ft,sites:fs2,pris:fpri}=buildPool(ql,src);
+  const foundSite=findSites(ql);
+  if(foundSite.length>0) {
+    // Multiple sites
+    return `## Sites: ${foundSite.join(', ')}\n\n`+
+      foundSite.map(site=>{
+        const st=fp.filter(t=>t.site===site);
+        return `**${site}:** ${num(st.length)} total · Open: ${st.filter(t=>['Open','In Progress'].includes(t.st)).length} · SLA: ${st.filter(t=>t.slaBreached).length} breaches`;
+      }).join('\n');
+  }
+  if(fp.length<src.length&&fp.length>0) {
+    const o=fp.filter(t=>['Open','In Progress'].includes(t.st)).length;
+    const cl=fp.filter(t=>['Closed','Resolved'].includes(t.st)).length;
+    const sb=fp.filter(t=>t.slaBreached).length;
+    return `**${num(fp.length)} tickets** found for: _${fl}_\n\n`+
+      `- Open/Active: ${num(o)}\n- Closed/Resolved: ${num(cl)}\n- SLA Breached: ${num(sb)}\n\n`+
+      `_Try asking: "who has the most?" or "show me the list" or "compare sites"_`;
+  }
+
+  return `I can answer questions about your **${num(src.length)} tickets**. Try:\n\n`+
+    `- **Agent:** _"tickets assigned to [name]"_ or just _"[last name]"_\n`+
+    `- **Site:** _"how many tickets at Aura this month"_\n`+
+    `- **Ranking:** _"who has the most open tickets in TPMO"_\n`+
+    `- **Date:** _"arceo tickets november 2025"_ or _"january 15, 2026"_\n`+
+    `- **SLA:** _"which site has most SLA violations this week"_\n`+
+    `- **Compare:** _"Picadily vs Aeropark"_ or _"this month vs last month"_\n`+
+    `- **Lists:** _"list all agents"_ · _"list all sites"_ · _"list all categories"_`;
+}
 function sendAIMessage(){
   if(_aiThinking) return;
   const input = document.getElementById('ai-input');
@@ -3903,6 +4113,7 @@ if(!document.getElementById('_bounce_style')){
   document.head.appendChild(s);
 }
 
+buildSearchIndex();
 buildAll();
 // Set default column labels after first build
 setTimeout(()=>{ setCmpPeriod('week', document.getElementById('cmp-week')); },100);

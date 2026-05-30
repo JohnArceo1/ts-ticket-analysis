@@ -3020,10 +3020,10 @@ function buildSearchIndex() {
 // ══════════════════════════════════════════════════════════════════
 function queryTickets(q) {
   const src = T.length ? T : getData();
-  if(!src.length) return '_No data loaded yet. Please wait for the dashboard to connect._';
+  if (!src.length) return '_No data loaded yet. Please wait for the dashboard to connect._';
 
   const now  = new Date();
-  const ql   = q.toLowerCase().replace(/[''`]/g,"'").replace(/\s+/g,' ').trim();
+  const ql   = q.toLowerCase().replace(/[''`""]/g,"'").replace(/\s+/g,' ').trim();
 
   // ── Date constants ─────────────────────────────────────────────
   const sod        = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -3034,94 +3034,52 @@ function queryTickets(q) {
   const last7      = new Date(now-7*86400000);
   const last30     = new Date(now-30*86400000);
   const last90     = new Date(now-90*86400000);
+  const yesterday  = new Date(sod-86400000);
   const ageDays    = t => Math.floor((now-t.created)/86400000);
+  const isOpen     = t => ['Open','In Progress','On Hold'].includes(t.st);
+  const isDone     = t => ['Closed','Resolved'].includes(t.st);
 
-  const MM = {january:0,jan:0,february:1,feb:1,march:2,mar:2,april:3,apr:3,
-    may:4,june:5,jun:5,july:6,jul:6,august:7,aug:7,september:8,sep:8,sept:8,
-    october:9,oct:9,november:10,nov:10,december:11,dec:11};
-  const MN = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-  const MR = 'january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec';
+  const MM={january:0,jan:0,february:1,feb:1,march:2,mar:2,april:3,apr:3,may:4,june:5,jun:5,july:6,jul:6,august:7,aug:7,september:8,sep:8,sept:8,october:9,oct:9,november:10,nov:10,december:11,dec:11};
+  const MN=['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const MR='january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec';
 
-  // ── Parse one period from query ────────────────────────────────
+  // ── Period parsing ─────────────────────────────────────────────
   function parsePeriod(q) {
     let m;
-    // Specific date: "feb 11 2026", "11 feb 2026", "february 11, 2026"
     m=q.match(new RegExp('\\b('+MR+')\\s+(\\d{1,2})[,\\s]+(\\d{4})\\b','i'));
-    if(m&&MM[m[1].toLowerCase()]!==undefined){
-      const s=new Date(+m[3],MM[m[1].toLowerCase()],+m[2]);const e=new Date(s);e.setHours(23,59,59,999);
-      return{start:s,end:e,label:MN[MM[m[1].toLowerCase()]]+' '+m[2]+', '+m[3]};
-    }
+    if(m&&MM[m[1].toLowerCase()]!==undefined){const s=new Date(+m[3],MM[m[1].toLowerCase()],+m[2]);const e=new Date(s);e.setHours(23,59,59,999);return{start:s,end:e,label:MN[MM[m[1].toLowerCase()]]+' '+m[2]+', '+m[3]};}
     m=q.match(new RegExp('\\b(\\d{1,2})\\s+('+MR+')[,\\s]+(\\d{4})\\b','i'));
-    if(m&&MM[m[2].toLowerCase()]!==undefined){
-      const s=new Date(+m[3],MM[m[2].toLowerCase()],+m[1]);const e=new Date(s);e.setHours(23,59,59,999);
-      return{start:s,end:e,label:MN[MM[m[2].toLowerCase()]]+' '+m[1]+', '+m[3]};
-    }
-    // Month + year: "november 2025"
+    if(m&&MM[m[2].toLowerCase()]!==undefined){const s=new Date(+m[3],MM[m[2].toLowerCase()],+m[1]);const e=new Date(s);e.setHours(23,59,59,999);return{start:s,end:e,label:MN[MM[m[2].toLowerCase()]]+' '+m[1]+', '+m[3]};}
     m=q.match(new RegExp('\\b('+MR+')\\s+(\\d{4})\\b','i'));
-    if(m&&MM[m[1].toLowerCase()]!==undefined){
-      const mi=MM[m[1].toLowerCase()],yr=+m[2];
-      return{start:new Date(yr,mi,1),end:new Date(yr,mi+1,0,23,59,59,999),label:MN[mi]+' '+yr};
-    }
-    // Month only: "last november", "in march"
+    if(m&&MM[m[1].toLowerCase()]!==undefined){const mi=MM[m[1].toLowerCase()],yr=+m[2];return{start:new Date(yr,mi,1),end:new Date(yr,mi+1,0,23,59,59,999),label:MN[mi]+' '+yr};}
     m=q.match(new RegExp('\\b(?:last|in|during|for|of)\\s+('+MR+')\\b','i'));
-    if(m&&MM[m[1].toLowerCase()]!==undefined){
-      const mi=MM[m[1].toLowerCase()];
-      const yr=mi>now.getMonth()?now.getFullYear()-1:now.getFullYear();
-      return{start:new Date(yr,mi,1),end:new Date(yr,mi+1,0,23,59,59,999),label:MN[mi]+' '+yr};
-    }
-    // Quarter: "Q1 2025"
-    m=q.match(/\bq([1-4])\s*(20\d{2})\b/i);
-    if(m){const qi=(+m[1]-1)*3,yr=+m[2];return{start:new Date(yr,qi,1),end:new Date(yr,qi+3,0,23,59,59,999),label:'Q'+m[1]+' '+yr};}
-    // Year: "2024", "in 2025"
-    m=q.match(/\b(20\d{2})\b/);
-    if(m&&+m[1]>=2020&&+m[1]<=now.getFullYear()+1)
-      return{start:new Date(+m[1],0,1),end:new Date(+m[1],11,31,23,59,59,999),label:'Year '+m[1]};
-    // Named
-    if(/\btoday\b/.test(q))               return{start:sod,end:new Date(sod.getTime()+86399999),label:'Today'};
-    if(/\byesterday\b/.test(q))           {const y=new Date(sod-86400000);return{start:y,end:new Date(y.getTime()+86399999),label:'Yesterday'};}
-    if(/this\s+week/.test(q))             return{start:weekStart,end:now,label:'This Week'};
-    if(/last\s+week/.test(q))             {const lws=new Date(weekStart-7*86400000);return{start:lws,end:new Date(weekStart-1),label:'Last Week'};}
-    if(/this\s+month/.test(q))            return{start:monthStart,end:now,label:'This Month'};
-    if(/last\s+month/.test(q))            return{start:lastMonthS,end:lastMonthE,label:'Last Month'};
-    if(/last\s*7|past\s*7|7\s*days?/.test(q))   return{start:last7,end:now,label:'Last 7 Days'};
-    if(/last\s*30|past\s*30|30\s*days?/.test(q)) return{start:last30,end:now,label:'Last 30 Days'};
-    if(/last\s*90|past\s*90|90\s*days?|quarter/.test(q)) return{start:last90,end:now,label:'Last 90 Days'};
+    if(m&&MM[m[1].toLowerCase()]!==undefined){const mi=MM[m[1].toLowerCase()];const yr=mi>now.getMonth()?now.getFullYear()-1:now.getFullYear();return{start:new Date(yr,mi,1),end:new Date(yr,mi+1,0,23,59,59,999),label:MN[mi]+' '+yr};}
+    m=q.match(/\bq([1-4])\s*(20\d{2})\b/i);if(m){const qi=(+m[1]-1)*3,yr=+m[2];return{start:new Date(yr,qi,1),end:new Date(yr,qi+3,0,23,59,59,999),label:'Q'+m[1]+' '+yr};}
+    m=q.match(/\b(20\d{2})\b/);if(m&&+m[1]>=2020&&+m[1]<=now.getFullYear()+1)return{start:new Date(+m[1],0,1),end:new Date(+m[1],11,31,23,59,59,999),label:'Year '+m[1]};
+    if(/\btoday\b/.test(q))    return{start:sod,end:new Date(sod.getTime()+86399999),label:'Today'};
+    if(/\byesterday\b/.test(q))return{start:yesterday,end:new Date(yesterday.getTime()+86399999),label:'Yesterday'};
+    if(/this\s*week/.test(q))  return{start:weekStart,end:now,label:'This Week'};
+    if(/last\s*week/.test(q))  {const lws=new Date(weekStart-7*86400000);return{start:lws,end:new Date(weekStart-1),label:'Last Week'};}
+    if(/this\s*month/.test(q)) return{start:monthStart,end:now,label:'This Month'};
+    if(/last\s*month/.test(q)) return{start:lastMonthS,end:lastMonthE,label:'Last Month'};
+    if(/last\s*7|7\s*days?/.test(q))  return{start:last7,end:now,label:'Last 7 Days'};
+    if(/last\s*30|30\s*days?/.test(q))return{start:last30,end:now,label:'Last 30 Days'};
+    if(/last\s*90|90\s*days?|quarter/.test(q))return{start:last90,end:now,label:'Last 90 Days'};
     return null;
   }
-
-  // Parse ALL dates from query (for comparisons)
-  function parseAllPeriods(q) {
-    const results=[];
-    // specific dates first
-    const re1=new RegExp('\\b('+MR+')\\s+(\\d{1,2})[,\\s]+(\\d{4})\\b','gi');
-    let m;
-    while((m=re1.exec(q))!==null){
-      const mi=MM[m[1].toLowerCase()];
-      if(mi===undefined)continue;
-      const s=new Date(+m[3],mi,+m[2]);const e=new Date(s);e.setHours(23,59,59,999);
-      results.push({start:s,end:e,label:MN[mi]+' '+m[2]+', '+m[3]});
-    }
-    if(results.length>=2) return results;
-    // month+year pairs
+  function parseAllPeriods(q){
+    const r=[];const re1=new RegExp('\\b('+MR+')\\s+(\\d{1,2})[,\\s]+(\\d{4})\\b','gi');let m;
+    while((m=re1.exec(q))!==null){const mi=MM[m[1].toLowerCase()];if(mi===undefined)continue;const s=new Date(+m[3],mi,+m[2]);const e=new Date(s);e.setHours(23,59,59,999);r.push({start:s,end:e,label:MN[mi]+' '+m[2]+', '+m[3]});}
+    if(r.length>=2)return r;
     const re2=new RegExp('\\b('+MR+')\\s+(\\d{4})\\b','gi');
-    while((m=re2.exec(q))!==null){
-      const mi=MM[m[1].toLowerCase()];
-      if(mi===undefined)continue;
-      const s=new Date(+m[2],mi,1);const e=new Date(+m[2],mi+1,0,23,59,59,999);
-      results.push({start:s,end:e,label:MN[mi]+' '+m[2]});
-    }
-    return results;
+    while((m=re2.exec(q))!==null){const mi=MM[m[1].toLowerCase()];if(mi===undefined)continue;const s=new Date(+m[2],mi,1);const e=new Date(+m[2],mi+1,0,23,59,59,999);r.push({start:s,end:e,label:MN[mi]+' '+m[2]});}
+    return r;
   }
+  const applyPeriod=(t,p)=>p?t.filter(x=>x.created>=p.start&&x.created<=p.end):t;
 
-  function applyPeriod(tickets,p){
-    if(!p)return tickets;
-    return tickets.filter(t=>t.created>=p.start&&t.created<=p.end);
-  }
-
-  // ── EMPLOYEE REGISTRY — every known employee, permanent ────────
-  const EMPLOYEES = [
-    {c:"Clinton Marsh",t:["clinton","marsh"],s:"marsh"},
-    {c:"Jupiter Ng",t:["jupiter","ng"],s:"ng"},
+  // ── Employee Registry ──────────────────────────────────────────
+  const EMP=[
+    {c:"Clinton Marsh",t:["clinton","marsh"],s:"marsh"},{c:"Jupiter Ng",t:["jupiter","ng"],s:"ng"},
     {c:"Marie Josephine Montiflor",t:["marie","josephine","montiflor"],s:"montiflor"},
     {c:"Kristian Ancero",t:["kristian","ancero"],s:"ancero"},
     {c:"Krizzel Ann Etrata",t:["krizzel","ann","etrata"],s:"etrata"},
@@ -3203,6 +3161,7 @@ function queryTickets(q) {
     {c:"Vina Mae Fabon",t:["vina","mae","fabon"],s:"fabon"},
     {c:"Chito Aguila",t:["chito","aguila"],s:"aguila"},
     {c:"Meriq Van Edcel Cantos",t:["meriq","van","edcel","cantos"],s:"cantos"},
+    {c:"Merig Van Edcel Cantos",t:["merig","van","edcel","cantos"],s:"cantos"},
     {c:"Adrian Villa",t:["adrian","villa"],s:"villa"},
     {c:"Joshua Timothy Melchor",t:["joshua","timothy","melchor"],s:"melchor"},
     {c:"Poferio Santiago",t:["poferio","santiago"],s:"santiago"},
@@ -3232,116 +3191,82 @@ function queryTickets(q) {
     {c:"Voltaire Aaron Garceron",t:["voltaire","aaron","garceron"],s:"garceron"},
     {c:"Christian Domingo",t:["christian","domingo"],s:"domingo"},
     {c:"Michael John Alarcon",t:["michael","john","alarcon"],s:"alarcon"},
-    {c:"Merig Van Edcel Cantos",t:["merig","van","edcel","cantos"],s:"cantos"},
     {c:"Eldrich Clark Alfonso",t:["eldrich","clark","alfonso"],s:"alfonso"},
     {c:"Rica Sharmaine Magno",t:["rica","sharmaine","magno"],s:"magno"},
     {c:"Irene Billones",t:["irene","billones"],s:"billones"},
-    {c:"Voltaire Garceron",t:["voltaire","garceron"],s:"garceron"},
-    {c:"Christian Samontina",t:["christian","samontina"],s:"samontina"},
   ];
 
-  // Techgroup alias map — maps any natural language to OSP techgroup substrings
-  const TG_ALIASES = {
+  const TGA={
     'tpmo':['technical project management','tpmo'],
     'technical project':['technical project management'],
-    'project management':['technical project management'],
     'noc':['noc operations','noc systems','noc'],
-    'noc operations':['noc operations'],
-    'noc systems':['noc systems'],
     'service desk':['service desk'],
-    'helpdesk':['service desk','helpdesk'],
+    'helpdesk':['service desk'],
     'on-site':['on-site support','on site support'],
-    'on site':['on-site support','on site support'],
-    'onsite':['on-site support','on site support'],
+    'onsite':['on-site support'],
     'oss':['on-site support'],
     'access control':['access control and security','acs'],
     'acs':['access control and security','acs'],
     'security':['access control and security'],
-    'common area':['common area team','common area'],
+    'common area':['common area team'],
     'cat team':['common area team'],
     'network':['network operations','noc operations'],
-    'it support':['service desk','on-site support'],
-    'telecom':['telecom','telecommunications'],
+    'telecom':['telecom'],
     'infrastructure':['infrastructure'],
-    'project':['technical project management','tpmo'],
   };
 
-  // ── STOP words (never name tokens) ────────────────────────────
-  const STOP = new Set(('how many tickets to the for show me who is what does have their count '
-    +'all give list find get about with and or by tell total work load summary details info '
-    +'current status today week month year this last check please can you do did has had been '
-    +'were was number of in on at a an my your his her its our they he she it i from since '
-    +'until between during fetch pull violated sla breach overdue are is assigned open closed '
-    +'resolved active most top worst best highest lowest rank which site agent engineer '
-    +'handling assignee number give show tell display print compare vs versus compared '
-    +'tickets ticket').split(' '));
-  const SFXS = new Set(['i','ii','iii','iv','v','vi','vii','jr','sr','phd','md','dmd']);
+  const STOP=new Set(('how many tickets to the for show me who is what does have their count all give list find get about with and or by tell total work load summary details info current status today week month year this last check please can you do did has had been were was number of in on at a an my your his her its our they he she it i from since until between during pull are is assigned open closed resolved active most top worst best highest lowest rank which site agent engineer handling assignee show tell display print compare vs versus compared tickets ticket when was last time first latest recent created oldest newest').split(' '));
+  const SFXS=new Set(['i','ii','iii','iv','v','vi','jr','sr','phd','md','dmd']);
 
-  function normStr(s){
-    return s.toLowerCase()
-      .replace(/[ñ]/g,'n').replace(/[àáâä]/g,'a').replace(/[èéêë]/g,'e')
-      .replace(/[ìíîï]/g,'i').replace(/[òóôö]/g,'o').replace(/[ùúûü]/g,'u')
-      .replace(/[^a-z0-9]/g,' ').replace(/\s+/g,' ').trim();
-  }
+  const normStr=s=>s.toLowerCase().replace(/[ñ]/g,'n').replace(/[àáâã]/g,'a').replace(/[èéêë]/g,'e').replace(/[ìíîï]/g,'i').replace(/[òóôõö]/g,'o').replace(/[ùúûü]/g,'u').replace(/[^a-z0-9]/g,' ').replace(/\s+/g,' ').trim();
 
-  // ── Agent matching ─────────────────────────────────────────────
-  function scoreEmp(emp, qTokens) {
-    const qn = qTokens.join(' ');
-    if(emp.t.filter(x=>!SFXS.has(x)).every(x=>qTokens.includes(x))) return{score:10000,exact:true};
-    if(qn.includes(emp.t.join(' '))) return{score:9000,exact:true};
-    let score=0;const mi=new Set();
-    for(const qt of qTokens){
+  function scoreEmp(emp,qT){
+    const qn=qT.join(' ');
+    if(emp.t.filter(x=>!SFXS.has(x)).every(x=>qT.includes(x)))return{score:10000,exact:true};
+    if(qn.includes(emp.t.join(' ')))return{score:9000,exact:true};
+    let sc=0;const mi=new Set();
+    for(const qt of qT){
       if(SFXS.has(qt)||qt.length<2)continue;
       let bp=0,bi=-1;
       for(let i=0;i<emp.t.length;i++){
         if(mi.has(i))continue;
-        const tk=emp.t[i],isSur=(tk===emp.s),w=isSur?3:1;
+        const tk=emp.t[i],w=tk===emp.s?3:1;
         let pts=0;
-        if(tk===qt) pts=100*w;
-        else if(tk.startsWith(qt)&&qt.length>=3) pts=Math.round(70*w*qt.length/tk.length);
-        else if(qt.startsWith(tk)&&tk.length>=3) pts=Math.round(60*w*tk.length/qt.length);
+        if(tk===qt)pts=100*w;
+        else if(tk.startsWith(qt)&&qt.length>=3)pts=Math.round(70*w*qt.length/tk.length);
+        else if(qt.startsWith(tk)&&tk.length>=3)pts=Math.round(60*w*tk.length/qt.length);
         if(pts>bp){bp=pts;bi=i;}
       }
-      if(bp>0){score+=bp;mi.add(bi);}
+      if(bp>0){sc+=bp;mi.add(bi);}
     }
     const si=emp.t.indexOf(emp.s);
-    if(si>=0&&mi.has(si)&&mi.size>=2)score+=200;
-    if(si>=0&&mi.has(si)&&mi.size===1)score+=50;
-    if(mi.size===1&&!(si>=0&&mi.has(si))){
-      const mt=emp.t[[...mi][0]];
-      score=mt&&mt.length>=6?Math.floor(score*0.7):Math.floor(score*0.3);
-    }
-    return{score,exact:false};
+    if(si>=0&&mi.has(si)&&mi.size>=2)sc+=200;
+    if(si>=0&&mi.has(si)&&mi.size===1)sc+=50;
+    if(mi.size===1&&!(si>=0&&mi.has(si))){const mt=emp.t[[...mi][0]];sc=mt&&mt.length>=6?Math.floor(sc*0.7):Math.floor(sc*0.3);}
+    return{score:sc,exact:false};
   }
 
-  function findAgents(q) {
-    const liveAgents=(_idx.agents.length?_idx.agents:[...new Set(src.map(t=>t.agent).filter(a=>a&&a!=='Unassigned'))]);
-    const qn=normStr(q);
-    const qTokens=qn.split(' ').filter(t=>t.length>=2&&!STOP.has(t));
-    if(!qTokens.length)return[];
-    const seen=new Set();const results=[];
-
-    // Score registry employees
-    for(const emp of EMPLOYEES){
-      const{score,exact}=scoreEmp(emp,qTokens);
-      if(score<50)continue;
-      // Resolve to live agent name
-      let live=liveAgents.find(a=>normStr(a)===normStr(emp.c));
-      if(!live)live=liveAgents.find(a=>{const an=normStr(a).split(' ');return an.includes(emp.s);});
-      if(!live)live=liveAgents.find(a=>emp.t.some(t=>t.length>=4&&normStr(a).includes(t)));
-      const resolved=live||emp.c;
-      if(!seen.has(normStr(resolved))){seen.add(normStr(resolved));results.push({a:resolved,score,exact});}
+  function findAgents(q){
+    const live=_idx.agents.length?_idx.agents:[...new Set(src.map(t=>t.agent).filter(a=>a&&a!=='Unassigned'))];
+    const qn=normStr(q);const qT=qn.split(' ').filter(t=>t.length>=2&&!STOP.has(t));
+    if(!qT.length)return[];
+    const seen=new Set();const res=[];
+    for(const emp of EMP){
+      const{score,exact}=scoreEmp(emp,qT);if(score<50)continue;
+      let lv=live.find(a=>normStr(a)===normStr(emp.c));
+      if(!lv)lv=live.find(a=>normStr(a).split(' ').includes(emp.s));
+      if(!lv)lv=live.find(a=>emp.t.some(tk=>tk.length>=4&&normStr(a).includes(tk)));
+      const r=lv||emp.c;
+      if(!seen.has(normStr(r))){seen.add(normStr(r));res.push({a:r,score,exact});}
     }
-    // Also score live agents not in registry
-    for(const agent of liveAgents){
-      if(seen.has(normStr(agent)))continue;
-      const an=normStr(agent).split(' ').filter(Boolean);
+    for(const ag of live){
+      if(seen.has(normStr(ag)))continue;
+      const an=normStr(ag).split(' ').filter(Boolean);
       let si=an.length-1;while(si>0&&SFXS.has(an[si]))si--;
-      const empObj={c:agent,t:an,s:an[si]};
-      const{score,exact}=scoreEmp(empObj,qTokens);
-      if(score>=50){seen.add(normStr(agent));results.push({a:agent,score,exact});}
+      const{score,exact}=scoreEmp({c:ag,t:an,s:an[si]},qT);
+      if(score>=50){seen.add(normStr(ag));res.push({a:ag,score,exact});}
     }
-    return results.sort((a,b)=>b.score-a.score);
+    return res.sort((a,b)=>b.score-a.score);
   }
 
   function bestAgent(q){
@@ -3351,549 +3276,772 @@ function queryTickets(q) {
     return{name:top.a,confident:conf,all:m.slice(0,5).map(x=>x.a)};
   }
 
-  // ── Site matching — fully dynamic from live data ───────────────
   function findSites(q){
     const sites=_idx.sites.length?_idx.sites:[...new Set(src.map(t=>t.site).filter(Boolean))];
     const qn=normStr(q);
-    return sites.filter(s=>{
-      const sn=normStr(s);
-      return qn.includes(sn)||(sn.length>=4&&qn.includes(sn.slice(0,Math.min(7,sn.length))));
-    });
+    return sites.filter(s=>{const sn=normStr(s);return qn.includes(sn)||(sn.length>=4&&qn.includes(sn.slice(0,Math.min(7,sn.length))));});
   }
 
-  // ── Category + subcategory matching — fully dynamic ────────────
   function findCats(q){
-    const cats=[...(_idx.cats||[]),...(_idx.subcats||[])];
-    const qn=normStr(q);
-    const matched=new Set();
-    for(const c of cats){
-      const cn=normStr(c);
-      if(!cn)continue;
-      if(qn.includes(cn)){matched.add(c);continue;}
-      const tokens=cn.split(' ').filter(t=>t.length>=3);
-      if(tokens.length>0&&tokens.every(t=>qn.includes(t)))matched.add(c);
-    }
-    return[...matched];
+    const cats=[...(_idx.cats||[]),...(_idx.subcats||[])];const qn=normStr(q);const m=new Set();
+    for(const c of cats){const cn=normStr(c);if(!cn)continue;if(qn.includes(cn)){m.add(c);continue;}const tk=cn.split(' ').filter(t=>t.length>=3);if(tk.length>0&&tk.every(t=>qn.includes(t)))m.add(c);}
+    return[...m];
   }
 
-  // ── Techgroup matching — dynamic + aliases ─────────────────────
-  function findTechgroups(q){
+  function findTG(q){
     const tgs=_idx.techgroups.length?_idx.techgroups:[...new Set(src.map(t=>t.techgroup).filter(Boolean))];
-    const qn=normStr(q);
-    const matched=new Set();
-    // Direct match
-    for(const tg of tgs){
-      const tn=normStr(tg);
-      if(qn.includes(tn)){matched.add(tg);continue;}
-      const tokens=tn.split(' ').filter(t=>t.length>=3);
-      if(tokens.length>0&&tokens.every(t=>qn.includes(t)))matched.add(tg);
-    }
-    // Alias match
-    for(const[alias,patterns]of Object.entries(TG_ALIASES)){
-      if(!qn.includes(normStr(alias)))continue;
-      for(const tg of tgs){
-        const tn=normStr(tg);
-        if(patterns.some(p=>tn.includes(normStr(p))))matched.add(tg);
-      }
-    }
-    return[...matched];
+    const qn=normStr(q);const m=new Set();
+    for(const tg of tgs){const tn=normStr(tg);if(qn.includes(tn)){m.add(tg);continue;}const tk=tn.split(' ').filter(t=>t.length>=3);if(tk.length>0&&tk.every(t=>qn.includes(t)))m.add(tg);}
+    for(const[alias,patterns]of Object.entries(TGA)){if(!qn.includes(normStr(alias)))continue;for(const tg of tgs){const tn=normStr(tg);if(patterns.some(p=>tn.includes(normStr(p))))m.add(tg);}}
+    return[...m];
   }
 
-  function findPriorities(q){
-    return['P1','P2','P3','P4'].filter(p=>
-      q.includes(p.toLowerCase())||
-      (p==='P1'&&/\bcritical\b|\burgent\b/.test(q))||
-      (p==='P2'&&/\bhigh\b/.test(q))||
-      (p==='P3'&&/\bmedium\b|\bplanned\b/.test(q))||
-      (p==='P4'&&/\blow\b/.test(q)));
-  }
-
-  function findStatuses(q){
+  function findPri(q){return['P1','P2','P3','P4'].filter(p=>q.includes(p.toLowerCase())||(p==='P1'&&/\bcritical\b|\burgent\b/.test(q))||(p==='P2'&&/\bhigh\b/.test(q))||(p==='P3'&&/\bmedium\b|\bplanned\b/.test(q))||(p==='P4'&&/\blow\b/.test(q)));}
+  function findStat(q){
     if(/\bopen\b/.test(q)&&!/closed|resolved/.test(q))return['Open','In Progress','On Hold'];
-    if(/in\s+progress|inprogress|ongoing/.test(q))return['In Progress'];
-    if(/on.?hold|waiting|pending/.test(q))return['On Hold'];
+    if(/in\s*progress|inprogress/.test(q))return['In Progress'];
+    if(/on.?hold|waiting/.test(q))return['On Hold'];
     if(/\bclosed\b/.test(q)&&!/resolved/.test(q))return['Closed'];
     if(/\bresolved\b/.test(q)&&!/closed/.test(q))return['Resolved'];
-    if(/closed.*resolved|resolved.*closed|done|completed/.test(q))return['Closed','Resolved'];
+    if(/done|complete|closed.*resolved|resolved.*closed/.test(q))return['Closed','Resolved'];
     if(/escalat/.test(q))return['Escalated'];
     return[];
   }
 
-  // ── Universal filter pool builder ──────────────────────────────
-  function buildPool(q, base){
-    const period=parsePeriod(q);
-    const cats=findCats(q);
-    const tgs=findTechgroups(q);
-    const sites=findSites(q);
-    const pris=findPriorities(q);
-    const stats=findStatuses(q);
-    const ageM=q.match(/(\d+)\s*days?\s*(old|older|aging|aged|past)/)||q.match(/older\s*than\s*(\d+)/)||q.match(/(\d+)\+\s*days?/);
-    const ageN=ageM?+ageM[1]:null;
-
+  function buildPool(q,base){
+    const period=parsePeriod(q);const cats=findCats(q);const tgs=findTG(q);
+    const sites=findSites(q);const pris=findPri(q);const stats=findStat(q);
+    const am=q.match(/(\d+)\s*days?\s*(old|older|aging)/)||q.match(/older\s*than\s*(\d+)/)||q.match(/(\d+)\+\s*days?/);
+    const ageN=am?+am[1]:null;
     let pool=applyPeriod(base,period);
-    if(cats.length) pool=pool.filter(t=>cats.some(c=>t.cat===c||t.raw?.cf_2583===c));
-    if(tgs.length)  pool=pool.filter(t=>tgs.includes(t.techgroup));
+    if(cats.length)pool=pool.filter(t=>cats.some(c=>t.cat===c||(t.raw&&t.raw.cf_2583===c)));
+    if(tgs.length)pool=pool.filter(t=>tgs.includes(t.techgroup));
     if(sites.length)pool=pool.filter(t=>sites.includes(t.site));
-    if(pris.length) pool=pool.filter(t=>pris.includes(t.pri));
+    if(pris.length)pool=pool.filter(t=>pris.includes(t.pri));
     if(stats.length)pool=pool.filter(t=>stats.includes(t.st));
-    if(ageN)        pool=pool.filter(t=>ageDays(t)>=ageN);
-
-    const filters=[period?period.label:null,cats.length?cats.join(', '):null,
-      tgs.length?tgs.join(', '):null,sites.length?sites.join(', '):null,
-      pris.length?pris.join(', '):null,stats.length?stats.join(', '):null,
-      ageN?ageN+'+ days old':null].filter(Boolean);
-
-    return{pool,period,cats,tgs,sites,pris,stats,ageN,
-      label:filters.length?filters.join(' · '):'all time',
-      periodLabel:period?period.label:'all time'};
+    if(ageN)pool=pool.filter(t=>ageDays(t)>=ageN);
+    const fl=[period?period.label:null,cats.length?cats.join(', '):null,tgs.length?tgs.join(', '):null,sites.length?sites.join(', '):null,pris.length?pris.join(', '):null,stats.length?stats.join(', '):null,ageN?ageN+'+ days':null].filter(Boolean);
+    return{pool,period,cats,tgs,sites,pris,stats,ageN,label:fl.length?fl.join(' · '):'all time',periodLabel:period?period.label:'all time'};
   }
 
   // ── Helpers ────────────────────────────────────────────────────
-  const num=n=>(n||0).toLocaleString();
-  const pct=(n,d)=>d>0?Math.round(n/Math.max(d,1)*100)+'%':'0%';
+  const n=x=>(x||0).toLocaleString();
+  const pct=(x,d)=>d>0?Math.round(x/Math.max(d,1)*100)+'%':'0%';
   const medal=i=>i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}.`;
+  const fd=d=>d?d.toLocaleDateString('en-US',{weekday:'short',year:'numeric',month:'short',day:'numeric'}):'—';
+  const ft=d=>d?d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}):'—';
+  const da=d=>{if(!d)return'—';const x=Math.floor((now-d)/86400000);return x===0?'Today':x===1?'Yesterday':x+' days ago';};
 
-  function stats(tickets){
-    const o=tickets.filter(t=>['Open','In Progress'].includes(t.st)).length;
-    const ip=tickets.filter(t=>t.st==='In Progress').length;
-    const oh=tickets.filter(t=>t.st==='On Hold').length;
-    const cl=tickets.filter(t=>t.st==='Closed').length;
-    const rs=tickets.filter(t=>t.st==='Resolved').length;
-    const sb=tickets.filter(t=>t.slaBreached).length;
-    const p1=tickets.filter(t=>t.pri==='P1').length;
-    const a30=tickets.filter(t=>['Open','In Progress','On Hold'].includes(t.st)&&ageDays(t)>=30).length;
-    const catC={},siteC={},priC={},agC={};
-    tickets.forEach(t=>{
-      catC[t.cat]=(catC[t.cat]||0)+1;
-      siteC[t.site]=(siteC[t.site]||0)+1;
-      priC[t.pri]=(priC[t.pri]||0)+1;
+  function stats(T){
+    const open=T.filter(t=>isOpen(t)).length,ip=T.filter(t=>t.st==='In Progress').length,oh=T.filter(t=>t.st==='On Hold').length;
+    const cl=T.filter(t=>t.st==='Closed').length,rs=T.filter(t=>t.st==='Resolved').length;
+    const sb=T.filter(t=>t.slaBreached).length,p1=T.filter(t=>t.pri==='P1').length;
+    const a30=T.filter(t=>isOpen(t)&&ageDays(t)>=30).length,a60=T.filter(t=>isOpen(t)&&ageDays(t)>=60).length,a90=T.filter(t=>isOpen(t)&&ageDays(t)>=90).length;
+    const ua=T.filter(t=>!t.agent||t.agent==='Unassigned').length;
+    const esc=T.filter(t=>t.st==='Escalated').length;
+    const catC={},siteC={},priC={},agC={},tgC={};
+    T.forEach(t=>{
+      catC[t.cat]=(catC[t.cat]||0)+1;siteC[t.site]=(siteC[t.site]||0)+1;
+      priC[t.pri]=(priC[t.pri]||0)+1;tgC[t.techgroup]=(tgC[t.techgroup]||0)+1;
       if(t.agent&&t.agent!=='Unassigned')agC[t.agent]=(agC[t.agent]||0)+1;
     });
-    const topCats=Object.entries(catC).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([c,n])=>`${c}(${n})`).join(', ');
-    const topSites=Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([s,n])=>`${s}(${n})`).join(', ');
-    const topAgent=Object.entries(agC).sort((a,b)=>b[1]-a[1])[0];
-    const priBreak=['P1','P2','P3','P4'].map(p=>`${p}:${priC[p]||0}`).join(' · ');
-    return{total:tickets.length,open:o,inProg:ip,onHold:oh,closed:cl,resolved:rs,
-      slaB:sb,p1,aged30:a30,topCats,topSites,topAgent,priBreak,catC,siteC,agC};
+    const sCats=Object.entries(catC).sort((a,b)=>b[1]-a[1]);
+    const sSites=Object.entries(siteC).sort((a,b)=>b[1]-a[1]);
+    const sAgs=Object.entries(agC).sort((a,b)=>b[1]-a[1]);
+    const sTGs=Object.entries(tgC).sort((a,b)=>b[1]-a[1]);
+    const slaComp=Math.max(0,100-Math.round(sb/Math.max(T.length,1)*100));
+    const openT=T.filter(t=>isOpen(t));
+    const avgAge=openT.length?Math.round(openT.reduce((a,t)=>a+ageDays(t),0)/openT.length):0;
+    const doneT=T.filter(t=>isDone(t));
+    return{total:T.length,open,ip,oh,cl,rs,sb,p1,a30,a60,a90,ua,esc,slaComp,avgAge,catC,siteC,agC,tgC,
+      topCat:sCats[0],topSite:sSites[0],topAgent:sAgs[0],topTG:sTGs[0],
+      topCats:sCats.slice(0,5).map(([c,x])=>`${c}(${x})`).join(', '),
+      topSites:sSites.slice(0,5).map(([s,x])=>`${s}(${x})`).join(', '),
+      priBreak:['P1','P2','P3','P4'].map(p=>`${p}:${priC[p]||0}`).join(' · '),
+      doneCount:doneT.length,sCats,sSites,sAgs,sTGs};
   }
 
+  // 6-month data
+  function monthlyData(pool){
+    return Array.from({length:6},(_,i)=>{
+      const ms=new Date(now.getFullYear(),now.getMonth()-5+i,1);
+      const me=new Date(now.getFullYear(),now.getMonth()-5+i+1,0,23,59,59,999);
+      const t=pool.filter(x=>x.created>=ms&&x.created<=me);
+      return{label:MN[ms.getMonth()].slice(0,3)+' '+ms.getFullYear(),ms,
+        total:t.length,open:t.filter(x=>isOpen(x)).length,done:t.filter(x=>isDone(x)).length,sla:t.filter(x=>x.slaBreached).length};
+    });
+  }
+
+  // ── Intent keyword maps (covers ALL 600 questions) ─────────────
+  const isWhen     = /\bwhen\b|\blast\s*time\b|\blast\s*ticket\b|\blatest\s*ticket\b|\bfirst\s*ticket\b|\boldest\s*ticket\b|\bmost\s*recent\b|\bwhen\s*did\b|\bwhen\s*was\b/.test(ql);
+  const isTrend    = /\btrend\b|\bincreas|\bdecreas|\bgrowing\b|\bvolume\b|\bpeak\b|\bseasonal\b|\bbusiest\b|\bday.*most\b|\bmonthly.*trend\b|\bweekly.*trend\b|\bdaily.*trend\b/.test(ql);
+  const isChanged  = /what.*changed|changed.*since|different.*from|change.*from|what.*improv|what.*worsened|what.*declin|kpi.*improv|kpi.*declin|metric.*worsened|metric.*improved/.test(ql);
+  const isHealth   = /\boperational.*health\b|\bhealth\s*score\b|\boverall.*status\b|\bhow.*doing\b|\bhow.*are.*we\b|\bhighest.*risk.*today\b|\bprioritize.*today\b|\bfocus.*today\b|\bmanager.*prioritize\b|\bwhat.*first.*today\b|\bwhat.*escalate.*immediately\b|\bwhat.*urgent.*action\b|\bworst.*case\b|\bbest.*case\b/.test(ql);
+  const isSLAq     = /\bsla\b|\bviolat|\bbreach|\boverdue\b|\bcompliance\b|\bmissed.*target\b|\bare.*meeting.*sla\b|\bsla.*improv\b|\bsla.*declin\b/.test(ql);
+  const isBacklog  = /\bbacklog\b|\bpending\b|\bstuck\b|\bno.*update\b|\binactivity\b|\bnot.*resolv\b|\bopen.*ticket\b|\bcurrently.*open\b/.test(ql);
+  const isAging    = /\baging\b|\baged\b|\bold\s*ticket|\bstale\b|\bolder than\b|\bexceed.*30\b|\bexceed.*60\b|\bexceed.*90\b|\baverage.*age\b|\bmedian.*age\b|\b30.*days?\b|\b60.*days?\b|\b90.*days?\b/.test(ql);
+  const isRecurr   = /\brecurr|\brepeat|\broot.?cause|\bpattern\b|\bfrequent\b|\bcommon.*issue\b|\bduplicate\b|\bsame.*issue\b/.test(ql);
+  const isEngPerf  = /\bengineer.*perform|\bstaff.*perform|\bagent.*perform|\bwho.*best\b|\bwho.*fastest\b|\bwho.*most.*resolv|\bproductiv|\boverload|\bunderutil|\bworkload.*balance\b|\bworkload.*distribut\b|\boutperform|\bunderperform|\bwho.*coach|\bwho.*assist|\bwho.*capacity|\bwho.*struggle|\bwho.*impact/.test(ql);
+  const isTeam     = /\bteam.*sla\b|\bteam.*backlog\b|\bteam.*perform|\bteam.*efficien|\bteam.*staffing|\bteam.*risk\b|\bwhich.*team\b|\bteam.*target\b/.test(ql);
+  const isCatQ     = /\bcategor.*grow|\bcategor.*shrink|\bcategor.*sla\b|\bcategor.*backlog\b|\bcategor.*automat|\bcategor.*review|\bcategor.*risk\b|\bwhich.*categor/.test(ql);
+  const isForecast = /\bforecast|\bexpected.*next\b|\bnext.*week.*workload\b|\bnext.*month.*workload\b|\bwhat.*expect|\bwill.*happen\b|\bif.*current.*trend\b|\bscenario\b|\bif.*volume.*doubles\b|\bif.*staffing\b|\bif.*backlog\b/.test(ql);
+  const isAction   = /\bwhat.*should.*do\b|\bwhat.*prioritize\b|\bwhat.*focus\b|\bwhat.*action\b|\bwhat.*escalate\b|\bwhat.*communicate\b|\bwhat.*report\b|\bwhat.*meeting\b|\bwhat.*improve\b|\bsingular.*action\b|\bsingle.*most.*import\b|\bgreatest.*improv\b|\bwhat.*stop\b|\bwhat.*start\b/.test(ql);
+  const isAutomate = /\bautom|\bmanual.*task|\brepetit|\bself.?service\b|\beliminate\b|\bstandardize\b/.test(ql);
+  const isTicketRev= /\bwhich.*ticket.*review\b|\bwhich.*ticket.*escalate\b|\bticket.*risk\b|\bticket.*attention\b|\bticket.*inactiv|\bticket.*no.*update\b/.test(ql);
+  const isSpikeQ   = /\bspike\b|\bsurge\b|\bvolume.*spike\b|\bticket.*spike\b|\bwhy.*increas|\bwhy.*surge\b|\bticket.*creat.*exceed\b/.test(ql);
+  const isContactQ = /\bwhich.*user|\bwhich.*client|\bwhich.*customer|\bwho.*submit|\bwho.*create.*most/.test(ql);
+
+  const num2=n;const p2=pct;
+
   // ══════════════════════════════════════════════════════════════
-  // INTENTS — ordered: specific → general
+  // HANDLERS
   // ══════════════════════════════════════════════════════════════
 
-  // ── META discovery commands ────────────────────────────────────
-  if(/list.*(all\s*)?(agent|staff|employee|engineer|assignee)|show.*all.*agent|who.*work.*here/.test(ql)){
-    const agents=(_idx.agents.length?_idx.agents:[...new Set(src.map(t=>t.agent).filter(a=>a&&a!=='Unassigned'))]).sort();
-    return`## All Agents (${agents.length})\n\n`+agents.map((a,i)=>`${i+1}. ${a}`).join('\n')+
-      `\n\n_Type any name, last name, or first name to get their ticket details._`;
+  // META
+  if(/list.*(all\s*)?(agent|staff|employee)|show.*all.*agent|who.*work.*here/.test(ql)){
+    const ag=(_idx.agents.length?_idx.agents:[...new Set(src.map(t=>t.agent).filter(a=>a&&a!=='Unassigned'))]).sort();
+    return`## All Agents (${ag.length})\n\n`+ag.map((a,i)=>`${i+1}. ${a}`).join('\n')+`\n\n_Type any name or surname for their full ticket details._`;
   }
   if(/list.*(all\s*)?(site|location)|show.*all.*site/.test(ql)){
-    const sites=(_idx.sites.length?_idx.sites:[...new Set(src.map(t=>t.site).filter(Boolean))]).sort();
-    return`## All Sites (${sites.length})\n\n`+sites.map((s,i)=>`${i+1}. ${s}`).join('\n');
+    const si=(_idx.sites.length?_idx.sites:[...new Set(src.map(t=>t.site).filter(Boolean))]).sort();
+    return`## All Sites (${si.length})\n\n`+si.map((s,i)=>`${i+1}. ${s}`).join('\n');
   }
   if(/list.*(all\s*)?(categor|department|dept|techgroup)|show.*all.*cat|all.*department/.test(ql)){
-    const tgs=(_idx.techgroups.length?_idx.techgroups:[]).sort();
-    const cats=(_idx.cats.length?_idx.cats:[]).sort();
-    const subs=(_idx.subcats.length?_idx.subcats:[]).sort();
-    return`## Tech Groups / Departments (${tgs.length})\n\n`+tgs.map((t,i)=>`${i+1}. **${t}**`).join('\n')+
-      `\n\n## Categories (${cats.length})\n\n`+cats.map((c,i)=>`${i+1}. ${c}`).join('\n')+
-      (subs.length?`\n\n## Sub-Categories (${subs.length})\n\n`+subs.map((s,i)=>`${i+1}. ${s}`).join('\n'):'');
+    const tg=(_idx.techgroups||[]).slice().sort(),ca=(_idx.cats||[]).slice().sort(),su=(_idx.subcats||[]).slice().sort();
+    return`## Departments / Tech Groups (${tg.length})\n\n`+tg.map((t,i)=>`${i+1}. **${t}**`).join('\n')+
+      `\n\n## Categories (${ca.length})\n\n`+ca.map((c,i)=>`${i+1}. ${c}`).join('\n')+
+      (su.length?`\n\n## Sub-Categories (${su.length})\n\n`+su.map((s,i)=>`${i+1}. ${s}`).join('\n'):'');
   }
-  if(/^score\s+/.test(ql)){
-    const testQ=ql.replace(/^score\s+/,'');
-    const r=findAgents(testQ);
-    return r.length?`**Score debug: "${testQ}"**\n\n`+r.map(x=>`- ${x.a}: **${x.score}**${x.exact?' (exact)':''}`).join('\n'):`No agents scored for "${testQ}"`;
-  }
+  if(/^score\s+/.test(ql)){const r=findAgents(ql.replace(/^score\s+/,''));return r.length?`**Score debug:**\n\n`+r.map(x=>`- ${x.a}: **${x.score}**${x.exact?' ✓':''}`).join('\n'):`No match.`;}
 
-  // ── AGENT detection (runs before everything else) ──────────────
-  const agentMatch=bestAgent(ql);
-  if(agentMatch&&!agentMatch.confident&&agentMatch.all.length>1){
-    return`Multiple agents match. Did you mean:\n\n`+agentMatch.all.map((a,i)=>`${i+1}. **${a}**`).join('\n')+
-      `\n\nUse their full name or surname.`;
-  }
+  // AGENT (runs before all other handlers)
+  const AM=bestAgent(ql);
+  if(AM&&!AM.confident&&AM.all.length>1)return`Multiple agents match. Did you mean:\n\n`+AM.all.map((a,i)=>`${i+1}. **${a}**`).join('\n')+`\n\nUse their full name or surname.`;
 
-  if(agentMatch&&agentMatch.confident){
-    const name=agentMatch.name;
-    const allAgT=src.filter(t=>t.agent===name);
-    if(!allAgT.length)return`No tickets found for **${name}**.\n\n_Note: They may be listed under a different name in OSP. Type "list all agents" to see all names._`;
+  if(AM&&AM.confident){
+    const nm=AM.name;
+    const all=src.filter(t=>t.agent===nm);
+    if(!all.length)return`No tickets found for **${nm}**.\n\nType _"list all agents"_ to see exact names in the system.`;
+    const sorted=all.filter(t=>t.created).sort((a,b)=>a.created-b.created);
+    const latest=sorted[sorted.length-1],first=sorted[0];
 
-    const{pool,period,ageN,label,periodLabel:pl}=buildPool(ql,allAgT);
-    const isFiltered=pool.length!==allAgT.length;
-    const subNote=isFiltered?`_${num(pool.length)} of ${num(allAgT.length)} all-time tickets · filter: ${label}_\n\n`:'';
-    const heading=`## 👤 ${name} — ${pl}`;
-
-    const wantSLA  =/sla|violat|breach|overdue/.test(ql);
-    const wantOpen =/\bopen\b|\bactive\b/.test(ql)&&!/closed|resolved/.test(ql);
-    const wantClosed=/\bclosed\b|\bresolved\b|\bdone\b/.test(ql)&&!/open/.test(ql);
-    const wantP1   =/\bp1\b|\bcritical\b|\burgent\b/.test(ql);
-    const wantHold =/on.?hold|\bhold\b|\bwaiting\b/.test(ql);
-    const wantAged =ageN!==null;
-    const wantList =/list|show all|display all|give me all/.test(ql)&&!wantSLA&&!wantP1&&!wantOpen;
-
-    if(wantSLA){
-      const sl=pool.filter(t=>t.slaBreached);
-      if(!sl.length)return`${heading}\n\n${subNote}✅ No SLA-breached tickets.`;
-      return`${heading}\n\n${subNote}🔴 **${num(sl.length)} SLA-breached tickets:**\n\n`+
-        sl.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | ${t.cat} | Age:${ageDays(t)}d | ${(t.title||'').slice(0,50)}`).join('\n')+
-        (sl.length>20?`\n\n_…and ${sl.length-20} more_`:'');
-    }
-    if(wantP1){
-      const p1t=pool.filter(t=>t.pri==='P1'&&['Open','In Progress','On Hold'].includes(t.st));
-      if(!p1t.length)return`${heading}\n\n${subNote}✅ No active P1 tickets.`;
-      return`${heading}\n\n${subNote}⚡ **${num(p1t.length)} active P1 tickets:**\n\n`+
-        p1t.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | Age:${ageDays(t)}d | ${(t.title||'').slice(0,50)}`).join('\n');
-    }
-    if(wantHold){
-      const ht=pool.filter(t=>t.st==='On Hold');
-      if(!ht.length)return`${heading}\n\n${subNote}✅ No on-hold tickets.`;
-      return`${heading}\n\n${subNote}⏸ **${num(ht.length)} on-hold tickets:**\n\n`+
-        ht.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.pri} | Age:${ageDays(t)}d | ${(t.title||'').slice(0,50)}`).join('\n');
-    }
-    if(wantAged){
-      const at=pool.filter(t=>['Open','In Progress','On Hold'].includes(t.st)&&ageDays(t)>=ageN);
-      if(!at.length)return`${heading}\n\n${subNote}✅ No open tickets older than ${ageN} days.`;
-      return`${heading}\n\n${subNote}⏳ **${num(at.length)} tickets older than ${ageN} days:**\n\n`+
-        at.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | Age:**${ageDays(t)}d** | ${(t.title||'').slice(0,50)}`).join('\n');
-    }
-    if(wantOpen){
-      const ot=pool.filter(t=>['Open','In Progress','On Hold'].includes(t.st));
-      if(!ot.length)return`${heading}\n\n${subNote}✅ No open tickets.`;
-      return`${heading}\n\n${subNote}🟡 **${num(ot.length)} open tickets:**\n\n`+
-        ot.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | ${t.pri} | Age:${ageDays(t)}d | ${(t.title||'').slice(0,50)}`).join('\n')+
-        (ot.length>20?`\n\n_…and ${ot.length-20} more_`:'');
-    }
-    if(wantClosed){
-      const ct=pool.filter(t=>['Closed','Resolved'].includes(t.st));
-      return`${heading}\n\n${subNote}✅ **${num(ct.length)} closed/resolved** in ${pl}\n- Closed: ${num(pool.filter(t=>t.st==='Closed').length)}\n- Resolved: ${num(pool.filter(t=>t.st==='Resolved').length)}`;
-    }
-    if(wantList&&pool.length<=30){
-      return`${heading}\n\n${subNote}**${num(pool.length)} tickets:**\n\n`+
-        pool.slice(0,30).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | ${t.pri} | ${t.cat} | Age:${ageDays(t)}d | ${(t.title||'').slice(0,50)}`).join('\n');
-    }
-
-    // Full profile
-    const s=stats(pool);
-    const thisM=allAgT.filter(t=>t.created>=monthStart);
-    const lastM=allAgT.filter(t=>t.created>=lastMonthS&&t.created<=lastMonthE);
-    return[heading,subNote,
-      `| Status | Count |`,`|--------|-------|`,
-      `| 🟡 Open/Active | ${num(s.open)} |`,
-      `| 🔵 In Progress | ${num(s.inProg)} |`,
-      `| ⏸ On Hold | ${num(s.onHold)} |`,
-      `| ✅ Closed | ${num(s.closed)} |`,
-      `| ✔ Resolved | ${num(s.resolved)} |`,
-      `| 🔴 SLA Breached | ${num(s.slaB)} (${pct(s.slaB,pool.length)}) |`,
-      `| ⚡ P1 Critical | ${num(s.p1)} |`,
-      `| ⏳ Open 30+ days | ${num(s.aged30)} |`,
-      `| **Total (${pl})** | **${num(pool.length)}** |`,``,
-      period?'':`**This month:** ${num(thisM.length)} · **Last month:** ${num(lastM.length)}`,
-      `**Priority:** ${s.priBreak}`,
-      `**Top categories:** ${s.topCats||'—'}`,
-      `**Top sites:** ${s.topSites||'—'}`,
-    ].filter(x=>x!==null&&x!==undefined).join('\n');
-  }
-
-  // ── COMPARISON ─────────────────────────────────────────────────
-  if(/\bvs\.?\b|\bversus\b|\bcompare\b|\bcompared\b/.test(ql)){
-    const allDates=parseAllPeriods(ql);
-    const agentMatches=findAgents(ql);
-    const topA=agentMatches.length>0?bestAgent(ql):null;
-
-    // Same agent, two dates
-    if(topA&&topA.confident&&allDates.length>=2){
-      const name=topA.name;
-      const agT=src.filter(t=>t.agent===name);
-      const[d1,d2]=allDates;
-      const wantOpen=/\bopen\b|\bactive\b/.test(ql)&&!/closed|resolved/.test(ql);
-      const wantSLA=/sla|violat|breach/.test(ql);
-      const filt=(tickets,p)=>{
-        let t=tickets.filter(tt=>tt.created>=p.start&&tt.created<=p.end);
-        if(wantOpen)t=t.filter(tt=>['Open','In Progress','On Hold'].includes(tt.st));
-        if(wantSLA) t=t.filter(tt=>tt.slaBreached);
-        return t;
-      };
-      const p1t=filt(agT,d1),p2t=filt(agT,d2);
-      const typeL=wantOpen?'open tickets':wantSLA?'SLA-breached':'tickets';
-      const diff=p1t.length-p2t.length;
-      return[
-        `## 👤 ${name} — Date Comparison`,
-        `_Comparing ${typeL}_`,``,
-        `| Period | ${typeL} | Open | Closed | SLA |`,
-        `|--------|------|------|--------|-----|`,
-        `| **${d1.label}** | **${num(p1t.length)}** | ${p1t.filter(t=>['Open','In Progress'].includes(t.st)).length} | ${p1t.filter(t=>['Closed','Resolved'].includes(t.st)).length} | ${p1t.filter(t=>t.slaBreached).length} |`,
-        `| **${d2.label}** | **${num(p2t.length)}** | ${p2t.filter(t=>['Open','In Progress'].includes(t.st)).length} | ${p2t.filter(t=>['Closed','Resolved'].includes(t.st)).length} | ${p2t.filter(t=>t.slaBreached).length} |`,``,
-        `**Difference:** ${diff>0?'+':''}${diff} (${diff>0?'📈 more in '+d1.label:diff<0?'📈 more in '+d2.label:'Equal'})`,
-        `**All-time for ${name}:** ${num(agT.length)} tickets`,
+    // When: last/first ticket
+    if(isWhen){
+      const wF=/\bfirst\b|\boldest\b|\bearli/.test(ql);
+      const tgt=wF?first:latest;
+      if(!tgt)return`No dated tickets for **${nm}**.`;
+      return[`## 👤 ${nm} — ${wF?'First':'Last'} Ticket`,``,
+        `| Field | Value |`,`|-------|-------|`,
+        `| 🗓 Date | **${fd(tgt.created)}** |`,
+        `| 🕐 Time | ${ft(tgt.created)} |`,
+        `| ⏱ When | **${da(tgt.created)}** |`,
+        `| 🎫 Ticket ID | ${tgt.id} |`,
+        `| 📍 Site | ${tgt.site} |`,
+        `| 🏷 Category | ${tgt.cat} |`,
+        `| 🔧 Tech Group | ${tgt.techgroup||'—'} |`,
+        `| ⚡ Priority | ${tgt.pri} |`,
+        `| 📋 Status | ${tgt.st} |`,
+        `| 📝 Title | ${(tgt.title||'—').slice(0,80)} |`,``,
+        `**${nm} total:** ${n(all.length)} tickets`,
+        `**First:** ${fd(first?.created)} (${da(first?.created)})`,
+        `**Latest:** ${fd(latest?.created)} (${da(latest?.created)})`,
       ].join('\n');
     }
 
-    // Two agents
-    if(agentMatches.length>=2){
-      const[a1,a2]=[agentMatches[0].a,agentMatches[1].a];
-      const pool1=allDates.length>=2?applyPeriod(src.filter(t=>t.agent===a1),allDates[0]):buildPool(ql,src.filter(t=>t.agent===a1)).pool;
-      const pool2=allDates.length>=2?applyPeriod(src.filter(t=>t.agent===a2),allDates[1]):buildPool(ql,src.filter(t=>t.agent===a2)).pool;
-      const pl1=allDates.length>=2?allDates[0].label:parsePeriod(ql)?.label||'all time';
-      const pl2=allDates.length>=2?allDates[1].label:pl1;
-      const s1=stats(pool1),s2=stats(pool2);
-      const w=k=>s1[k]>s2[k]?`↑ ${a1}`:s1[k]<s2[k]?`↑ ${a2}`:'Tied';
-      return`## ${a1} (${pl1}) vs ${a2} (${pl2})\n\n`+
-        `| Metric | ${a1} | ${a2} | Higher |\n|---|---|---|---|\n`+
-        `| Total | ${num(s1.total)} | ${num(s2.total)} | ${w('total')} |\n`+
-        `| Open | ${num(s1.open)} | ${num(s2.open)} | ${w('open')} |\n`+
-        `| Closed/Resolved | ${num(s1.closed+s1.resolved)} | ${num(s2.closed+s2.resolved)} | — |\n`+
-        `| SLA Breached | ${num(s1.slaB)} | ${num(s2.slaB)} | ${s1.slaB<s2.slaB?'↑ '+a1+' better':'↑ '+a2+' better'} |\n`+
-        `| P1 | ${num(s1.p1)} | ${num(s2.p1)} | — |`;
-    }
+    const{pool,period,ageN,label,periodLabel:pl}=buildPool(ql,all);
+    const s=stats(pool);
+    const thisM=all.filter(t=>t.created>=monthStart);
+    const lastM=all.filter(t=>t.created>=lastMonthS&&t.created<=lastMonthE);
 
-    // Two sites
-    const sites=findSites(ql);
-    if(sites.length>=2){
-      const[s1n,s2n]=[sites[0],sites[1]];
-      const period=parsePeriod(ql);
-      const p1=applyPeriod(src.filter(t=>t.site===s1n),period);
-      const p2=applyPeriod(src.filter(t=>t.site===s2n),period);
-      const pl=period?period.label:'all time';
-      const st=p=>({total:p.length,o:p.filter(t=>['Open','In Progress'].includes(t.st)).length,cl:p.filter(t=>['Closed','Resolved'].includes(t.st)).length,sb:p.filter(t=>t.slaBreached).length,ua:p.filter(t=>!t.agent||t.agent==='Unassigned').length});
-      const a=st(p1),b=st(p2);
-      const w=k=>a[k]>b[k]?`↑ ${s1n}`:a[k]<b[k]?`↑ ${s2n}`:'Tied';
+    const wSLA=/\bsla\b|\bviolat|\bbreach|\boverdue/.test(ql);
+    const wOpen=/\bopen\b|\bactive\b/.test(ql)&&!/closed|resolved/.test(ql);
+    const wClosed=/\bclosed\b|\bresolved\b|\bdone\b/.test(ql)&&!/\bopen\b/.test(ql);
+    const wP1=/\bp1\b|\bcritical\b|\burgent\b/.test(ql);
+    const wHold=/on.?hold|\bhold\b/.test(ql);
+    const wAged=ageN!==null;
+    const wList=/\blist\b|\ball tickets\b/.test(ql)&&!wSLA&&!wP1;
+
+    if(wSLA){const sl=pool.filter(t=>t.slaBreached);if(!sl.length)return`## 👤 ${nm}\n\n✅ No SLA-breached tickets${period?' in '+pl:''}.`;return`## 👤 ${nm} — SLA Breached (${pl})\n\n🔴 **${n(sl.length)} breached:**\n\n`+sl.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | ${t.cat} | Age:${ageDays(t)}d`).join('\n')+(sl.length>20?`\n_…+${sl.length-20} more_`:'');}
+    if(wP1){const p1t=pool.filter(t=>t.pri==='P1'&&isOpen(t));if(!p1t.length)return`## 👤 ${nm}\n\n✅ No active P1 tickets.`;return`## 👤 ${nm} — P1 Active (${pl})\n\n⚡ **${n(p1t.length)}:**\n\n`+p1t.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | Age:${ageDays(t)}d | ${(t.title||'').slice(0,50)}`).join('\n');}
+    if(wHold){const ht=pool.filter(t=>t.st==='On Hold');if(!ht.length)return`## 👤 ${nm}\n\n✅ No on-hold tickets.`;return`## 👤 ${nm} — On Hold (${pl})\n\n⏸ **${n(ht.length)}:**\n\n`+ht.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.pri} | Age:${ageDays(t)}d`).join('\n');}
+    if(wAged){const at=pool.filter(t=>isOpen(t)&&ageDays(t)>=ageN);if(!at.length)return`## 👤 ${nm}\n\n✅ No open tickets older than ${ageN} days.`;return`## 👤 ${nm} — Aging ${ageN}+ Days (${pl})\n\n⏳ **${n(at.length)}:**\n\n`+at.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | Age:**${ageDays(t)}d**`).join('\n');}
+    if(wOpen){const ot=pool.filter(t=>isOpen(t));if(!ot.length)return`## 👤 ${nm}\n\n✅ No open tickets.`;return`## 👤 ${nm} — Open (${pl})\n\n🟡 **${n(ot.length)}:**\n\n`+ot.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | ${t.pri} | Age:${ageDays(t)}d | ${(t.title||'').slice(0,50)}`).join('\n')+(ot.length>20?`\n_…+${ot.length-20} more_`:'');}
+    if(wClosed){const ct=pool.filter(t=>isDone(t));return`## 👤 ${nm} — Closed/Resolved (${pl})\n\n✅ **${n(ct.length)} done**\n- Closed: ${n(pool.filter(t=>t.st==='Closed').length)}\n- Resolved: ${n(pool.filter(t=>t.st==='Resolved').length)}`;}
+    if(wList&&pool.length<=30)return`## 👤 ${nm} — All Tickets (${pl})\n\n`+pool.map(t=>`- **${t.id}** | ${t.site} | ${t.st} | ${t.pri} | ${t.cat} | Age:${ageDays(t)}d`).join('\n');
+
+    // Default: full profile
+    return[`## 👤 ${nm} — ${pl}`,
+      pool.length!==all.length?`_${n(pool.length)} of ${n(all.length)} all-time · filter: ${label}_\n`:'',
+      `| Status | Count |`,`|--------|-------|`,
+      `| 🟡 Open/Active | ${n(s.open)} |`,`| 🔵 In Progress | ${n(s.ip)} |`,`| ⏸ On Hold | ${n(s.oh)} |`,
+      `| ✅ Closed | ${n(s.cl)} |`,`| ✔ Resolved | ${n(s.rs)} |`,
+      `| 🔴 SLA Breached | ${n(s.sb)} (${pct(s.sb,pool.length)}) |`,
+      `| ⚡ P1 Critical | ${n(s.p1)} |`,`| ⏳ Open 30+ days | ${n(s.a30)} |`,
+      `| **Total (${pl})** | **${n(pool.length)}** |`,``,
+      period?'':`**This month:** ${n(thisM.length)} · **Last month:** ${n(lastM.length)}`,
+      `**Latest ticket:** ${fd(latest?.created)} (${da(latest?.created)})`,
+      `**First ticket:** ${fd(first?.created)}`,
+      `**Priority mix:** ${s.priBreak}`,
+      `**Top categories:** ${s.topCats||'—'}`,
+      `**Top sites:** ${s.topSites||'—'}`,
+    ].filter(x=>x!==null&&x!==undefined&&x!=='').join('\n');
+  }
+
+  // COMPARISON
+  if(/\bvs\.?\b|\bversus\b|\bcompare\b|\bcompared\b/.test(ql)){
+    const allDates=parseAllPeriods(ql);const agM=findAgents(ql);const topA=agM.length>0?bestAgent(ql):null;
+    if(topA&&topA.confident&&allDates.length>=2){
+      const nm=topA.name;const agT=src.filter(t=>t.agent===nm);const[d1,d2]=allDates;
+      const wO=/\bopen\b|\bactive\b/.test(ql)&&!/closed/.test(ql);const wS=/\bsla\b|\bviolat/.test(ql);
+      const f=(T,p)=>{let t=T.filter(x=>x.created>=p.start&&x.created<=p.end);if(wO)t=t.filter(x=>isOpen(x));if(wS)t=t.filter(x=>x.slaBreached);return t;};
+      const p1t=f(agT,d1),p2t=f(agT,d2);const tL=wO?'open':wS?'SLA-breached':'tickets';const diff=p1t.length-p2t.length;
+      return[`## 👤 ${nm} — Date Comparison (${tL})`,``,
+        `| Period | Total | Open | Closed | SLA |`,`|--------|-------|------|--------|-----|`,
+        `| **${d1.label}** | **${n(p1t.length)}** | ${p1t.filter(t=>isOpen(t)).length} | ${p1t.filter(t=>isDone(t)).length} | ${p1t.filter(t=>t.slaBreached).length} |`,
+        `| **${d2.label}** | **${n(p2t.length)}** | ${p2t.filter(t=>isOpen(t)).length} | ${p2t.filter(t=>isDone(t)).length} | ${p2t.filter(t=>t.slaBreached).length} |`,``,
+        `**Diff:** ${diff>0?'+':''}${diff} — ${diff>0?'📈 more in '+d1.label:diff<0?'📈 more in '+d2.label:'🟰 Equal'}`,
+        `**All-time:** ${n(agT.length)} tickets`,
+      ].join('\n');
+    }
+    if(agM.length>=2){
+      const[a1,a2]=[agM[0].a,agM[1].a];
+      const pl=parsePeriod(ql);
+      const p1=allDates.length>=2?applyPeriod(src.filter(t=>t.agent===a1),allDates[0]):buildPool(ql,src.filter(t=>t.agent===a1)).pool;
+      const p2=allDates.length>=2?applyPeriod(src.filter(t=>t.agent===a2),allDates[1]):buildPool(ql,src.filter(t=>t.agent===a2)).pool;
+      const l1=allDates.length>=2?allDates[0].label:pl?.label||'all time';const l2=allDates.length>=2?allDates[1].label:l1;
+      const s1=stats(p1),s2=stats(p2);const w=k=>s1[k]>s2[k]?`↑ ${a1}`:s1[k]<s2[k]?`↑ ${a2}`:'Tied';
+      return`## ${a1} (${l1}) vs ${a2} (${l2})\n\n`+
+        `| Metric | ${a1} | ${a2} | Higher |\n|---|---|---|---|\n`+
+        `| Total | ${n(s1.total)} | ${n(s2.total)} | ${w('total')} |\n`+
+        `| Open | ${n(s1.open)} | ${n(s2.open)} | ${w('open')} |\n`+
+        `| Closed/Resolved | ${n(s1.cl+s1.rs)} | ${n(s2.cl+s2.rs)} | — |\n`+
+        `| SLA Breached | ${n(s1.sb)} | ${n(s2.sb)} | ${s1.sb<s2.sb?'↑ '+a1+' better':'↑ '+a2+' better'} |\n`+
+        `| P1 | ${n(s1.p1)} | ${n(s2.p1)} | — |`;
+    }
+    const cSites=findSites(ql);
+    if(cSites.length>=2){
+      const[s1n,s2n]=[cSites[0],cSites[1]];const per=parsePeriod(ql);
+      const p1=applyPeriod(src.filter(t=>t.site===s1n),per),p2=applyPeriod(src.filter(t=>t.site===s2n),per);
+      const pl=per?per.label:'all time';
+      const st=p=>({total:p.length,o:p.filter(t=>isOpen(t)).length,cl:p.filter(t=>isDone(t)).length,sb:p.filter(t=>t.slaBreached).length,ua:p.filter(t=>!t.agent||t.agent==='Unassigned').length});
+      const a=st(p1),b=st(p2);const w=k=>a[k]>b[k]?`↑ ${s1n}`:a[k]<b[k]?`↑ ${s2n}`:'Tied';
       return`## 📍 ${s1n} vs ${s2n} (${pl})\n\n`+
         `| Metric | ${s1n} | ${s2n} | Higher |\n|---|---|---|---|\n`+
-        `| Total | ${num(a.total)} | ${num(b.total)} | ${w('total')} |\n`+
-        `| Open | ${num(a.o)} | ${num(b.o)} | ${w('o')} |\n`+
-        `| Closed | ${num(a.cl)} | ${num(b.cl)} | — |\n`+
-        `| SLA Breached | ${num(a.sb)} (${pct(a.sb,a.total)}) | ${num(b.sb)} (${pct(b.sb,b.total)}) | ${a.sb<b.sb?'↑ '+s1n+' better':'↑ '+s2n+' better'} |\n`+
-        `| Unassigned | ${num(a.ua)} | ${num(b.ua)} | — |`;
+        `| Total | ${n(a.total)} | ${n(b.total)} | ${w('total')} |\n`+
+        `| Open | ${n(a.o)} | ${n(b.o)} | ${w('o')} |\n`+
+        `| Closed | ${n(a.cl)} | ${n(b.cl)} | — |\n`+
+        `| SLA Breached | ${n(a.sb)} (${pct(a.sb,a.total)}) | ${n(b.sb)} (${pct(b.sb,b.total)}) | ${a.sb<b.sb?'↑ '+s1n+' better':'↑ '+s2n+' better'} |\n`+
+        `| Unassigned | ${n(a.ua)} | ${n(b.ua)} | — |`;
     }
-
-    // Two time periods
     if(allDates.length>=2){
-      const[d1,d2]=allDates;
-      const p1=applyPeriod(src,d1),p2=applyPeriod(src,d2);
-      const diff=p1.length-p2.length;
+      const[d1,d2]=allDates;const p1=applyPeriod(src,d1),p2=applyPeriod(src,d2);const diff=p1.length-p2.length;
       return`## 📅 ${d1.label} vs ${d2.label}\n\n`+
         `| Metric | ${d1.label} | ${d2.label} |\n|---|---|---|\n`+
-        `| Total | **${num(p1.length)}** | **${num(p2.length)}** |\n`+
-        `| Open | ${p1.filter(t=>['Open','In Progress'].includes(t.st)).length} | ${p2.filter(t=>['Open','In Progress'].includes(t.st)).length} |\n`+
-        `| Closed | ${p1.filter(t=>['Closed','Resolved'].includes(t.st)).length} | ${p2.filter(t=>['Closed','Resolved'].includes(t.st)).length} |\n`+
+        `| Total | **${n(p1.length)}** | **${n(p2.length)}** |\n`+
+        `| Open | ${p1.filter(t=>isOpen(t)).length} | ${p2.filter(t=>isOpen(t)).length} |\n`+
+        `| Closed | ${p1.filter(t=>isDone(t)).length} | ${p2.filter(t=>isDone(t)).length} |\n`+
         `| SLA Breached | ${p1.filter(t=>t.slaBreached).length} | ${p2.filter(t=>t.slaBreached).length} |\n\n`+
-        `**Change:** ${diff>0?'+':''}${num(diff)} (${diff>0?'📈':'📉'})`;
+        `**Change:** ${diff>0?'+':''}${n(diff)} (${diff>0?'📈':'📉'})`;
     }
-
-    // Month vs month fallback
     if(/month/.test(ql)){
-      const cur=src.filter(t=>t.created>=monthStart);
-      const prev=src.filter(t=>t.created>=lastMonthS&&t.created<=lastMonthE);
-      const cn=MN[now.getMonth()],pn=MN[lastMonthS.getMonth()];
-      const diff=cur.length-prev.length;
+      const cur=src.filter(t=>t.created>=monthStart),prev=src.filter(t=>t.created>=lastMonthS&&t.created<=lastMonthE);
+      const cn=MN[now.getMonth()],pn=MN[lastMonthS.getMonth()];const diff=cur.length-prev.length;
       return`## ${cn} vs ${pn}\n\n`+
         `| Metric | ${cn} | ${pn} |\n|---|---|---|\n`+
-        `| Total | **${num(cur.length)}** | **${num(prev.length)}** |\n`+
-        `| Open | ${cur.filter(t=>['Open','In Progress'].includes(t.st)).length} | ${prev.filter(t=>['Open','In Progress'].includes(t.st)).length} |\n`+
-        `| Closed | ${cur.filter(t=>['Closed','Resolved'].includes(t.st)).length} | ${prev.filter(t=>['Closed','Resolved'].includes(t.st)).length} |\n`+
-        `| SLA Breached | ${cur.filter(t=>t.slaBreached).length} | ${prev.filter(t=>t.slaBreached).length} |\n\n`+
-        `**Change:** ${diff>0?'+':''}${num(diff)} (${diff>0?'📈':'📉'})`;
+        `| Total | **${n(cur.length)}** | **${n(prev.length)}** |\n`+
+        `| Open | ${cur.filter(t=>isOpen(t)).length} | ${prev.filter(t=>isOpen(t)).length} |\n`+
+        `| Closed | ${cur.filter(t=>isDone(t)).length} | ${prev.filter(t=>isDone(t)).length} |\n`+
+        `| SLA | ${cur.filter(t=>t.slaBreached).length} | ${prev.filter(t=>t.slaBreached).length} |\n\n`+
+        `**Change:** ${diff>0?'+':''}${n(diff)} (${diff>0?'📈':'📉'})`;
     }
   }
 
-  // ── TREND — is volume increasing or decreasing? ────────────────
-  if(/\btrend\b|\bincreas|\bdecreas|\bgrowing\b|\bdown\b|\bup\b|\bvolume\b/.test(ql)){
-    const{pool,periodLabel:pl}=buildPool(ql,src);
-    const months=[];
-    for(let i=5;i>=0;i--){
-      const ms=new Date(now.getFullYear(),now.getMonth()-i,1);
-      const me=new Date(now.getFullYear(),now.getMonth()-i+1,0,23,59,59,999);
-      const ct=pool.filter(t=>t.created>=ms&&t.created<=me).length;
-      months.push({label:MN[ms.getMonth()].slice(0,3)+' '+ms.getFullYear(),count:ct,ms});
-    }
-    const recent=months.slice(-2);
-    const diff=recent[1].count-recent[0].count;
-    const trend=diff>0?'📈 Increasing':'📉 Decreasing';
-    const max=Math.max(...months.map(m=>m.count))||1;
+  // TREND & VOLUME (Q29-50, Q101-115 from list 2)
+  if(isTrend){
+    const{pool}=buildPool(ql,src);
+    const md=monthlyData(pool);
+    const recent=md.slice(-2);const diff=recent[1].total-recent[0].total;
+    const trend=diff>0?'📈 Increasing':diff<0?'📉 Decreasing':'🟰 Stable';
+    const maxC=Math.max(...md.map(m=>m.total))||1;
+    const peak=md.reduce((a,b)=>a.total>b.total?a:b);
+    const dayC=[0,0,0,0,0,0,0];pool.forEach(t=>{if(t.created)dayC[t.created.getDay()]++;});
+    const dayN=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const busiestDay=dayN[dayC.indexOf(Math.max(...dayC))];
+    const growingCats=stats(pool.filter(t=>t.created>=last30)).sCats.slice(0,3).map(([c,x])=>`${c}(${x})`).join(', ');
     return[
       `## 📈 Ticket Volume Trend — Last 6 Months`,``,
-      months.map(m=>{
-        const bar='█'.repeat(Math.round(m.count/max*20));
-        return`**${m.label}** ${bar} ${num(m.count)}`;
-      }).join('\n'),``,
-      `**Trend: ${trend}** — ${diff>0?'+':''}${num(diff)} tickets vs previous month`,
-      `**Peak month:** ${months.reduce((a,b)=>a.count>b.count?a:b).label} (${num(Math.max(...months.map(m=>m.count)))})`,
+      md.map(m=>`**${m.label}** ${'█'.repeat(Math.round(m.total/maxC*20))} ${n(m.total)} (Open:${m.open} · Done:${m.done} · SLA:${m.sla})`).join('\n'),``,
+      `**Trend: ${trend}** — ${diff>0?'+':''}${n(diff)} vs prev month`,
+      `**Peak month:** ${peak.label} (${n(peak.total)})`,
+      `**Busiest day of week:** ${busiestDay}`,
+      `**Top categories last 30d:** ${growingCats}`,
+      `**Total in analysis:** ${n(pool.length)}`,
     ].join('\n');
   }
 
-  // ── RANKING — who/which has most/least ─────────────────────────
-  if(/\bmost\b|\btop\b|\bworst\b|\bbest\b|\bhighest\b|\blowest\b|\brank|\bwho has\b|\bwhich site\b|\bwho handles\b|\bwho is.*most\b/.test(ql)){
-    const{pool,label,periodLabel:pl,tgs,cats}=buildPool(ql,src);
-    const N=parseInt(ql.match(/top\s*(\d+)/)?.[1]||'10');
-    const wantOpen=/open|active/.test(ql)&&!/closed/.test(ql);
-    const wantSLA=/sla|violat|breach/.test(ql);
-    const wantClosed=/closed|resolved|done/.test(ql)&&!/open/.test(ql);
-    const wantUnassigned=/unassign/.test(ql);
-    const byAgent=/who|agent|person|engineer|staff|employee|assignee|assigned/.test(ql);
-
-    let subset=pool;
-    if(wantOpen)       subset=pool.filter(t=>['Open','In Progress','On Hold'].includes(t.st));
-    if(wantClosed)     subset=pool.filter(t=>['Closed','Resolved'].includes(t.st));
-    if(wantSLA)        subset=pool.filter(t=>t.slaBreached);
-    if(wantUnassigned) subset=pool.filter(t=>!t.agent||t.agent==='Unassigned');
-
-    const groupKey=byAgent?t=>t.agent:t=>t.site;
-    const groupC={};
-    subset.filter(t=>groupKey(t)&&groupKey(t)!=='Unassigned').forEach(t=>{const k=groupKey(t);groupC[k]=(groupC[k]||0)+1;});
-    const ranked=Object.entries(groupC).sort((a,b)=>b[1]-a[1]).slice(0,N);
-    if(!ranked.length)return`No ${wantOpen?'open ':wantSLA?'SLA-breached ':wantClosed?'closed ':''}tickets found for: ${label}`;
-
-    const typeL=wantOpen?'open tickets':wantSLA?'SLA violations':wantClosed?'closed/resolved':wantUnassigned?'unassigned':'tickets';
-    const ctx=[...cats,...tgs].join(', ')||'';
-    const heading=`## 🏆 Most ${typeL.charAt(0).toUpperCase()+typeL.slice(1)}${ctx?' — '+ctx:''} (${pl})`;
-
-    return heading+'\n\n'+ranked.map(([k,n],i)=>`${medal(i)} **${k}** — **${num(n)}** ${typeL}`).join('\n')+
-      `\n\n_Total ${typeL}: ${num(subset.filter(t=>groupKey(t)&&groupKey(t)!=='Unassigned').length)}_`;
+  // WHAT CHANGED (Q4-5, Q236-239, Q240-241 from list 2)
+  if(isChanged){
+    const todayT=src.filter(t=>t.created>=sod);
+    const yesterT=src.filter(t=>t.created>=yesterday&&t.created<sod);
+    const thisW=src.filter(t=>t.created>=weekStart);
+    const lastW=src.filter(t=>{const lws=new Date(weekStart-7*86400000);return t.created>=lws&&t.created<weekStart;});
+    const thisM=src.filter(t=>t.created>=monthStart);
+    const lastMT=src.filter(t=>t.created>=lastMonthS&&t.created<=lastMonthE);
+    const openNow=src.filter(t=>isOpen(t)).length;
+    const slaNow=src.filter(t=>t.slaBreached).length;
+    const slaLast=lastMT.filter(t=>t.slaBreached).length;
+    const diffD=todayT.length-yesterT.length;
+    const diffW=thisW.length-lastW.length;
+    const diffM=thisM.length-lastMT.length;
+    const slaComp=Math.max(0,100-Math.round(slaNow/Math.max(src.length,1)*100));
+    const topCatNow=stats(thisM).topCat;const topCatLast=stats(lastMT).topCat;
+    return[
+      `## 📊 What Changed`,``,
+      `**Today vs Yesterday:**`,
+      `- Tickets created: **${n(todayT.length)}** vs **${n(yesterT.length)}** (${diffD>=0?'+':''}${diffD})`,
+      `- SLA breaches today: **${todayT.filter(t=>t.slaBreached).length}**`,``,
+      `**This Week vs Last Week:**`,
+      `- Tickets: **${n(thisW.length)}** vs **${n(lastW.length)}** (${diffW>=0?'+':''}${diffW})`,``,
+      `**This Month vs Last Month:**`,
+      `- Tickets: **${n(thisM.length)}** vs **${n(lastMT.length)}** (${diffM>=0?'+':''}${diffM})`,
+      `- SLA breaches: **${thisM.filter(t=>t.slaBreached).length}** vs **${slaLast}** last month`,
+      `- SLA compliance: **${slaComp}%**`,
+      topCatNow?`- Top category now: **${topCatNow[0]}** (${topCatNow[1]})`:null,
+      topCatLast?`- Top category last month: **${topCatLast[0]}** (${topCatLast[1]})`:null,``,
+      `**Current open backlog:** ${n(openNow)}`,
+    ].filter(x=>x!==null).join('\n');
   }
 
-  // ── SLA / VIOLATIONS ──────────────────────────────────────────
-  if(/\bsla\b|\bviolat|\bbreach|\boverdue\b/.test(ql)){
-    const{pool,label,periodLabel:pl}=buildPool(ql,src);
-    const slaT=pool.filter(t=>t.slaBreached);
-    if(!slaT.length)return`✅ No SLA-breached tickets for: ${label}`;
-    const siteC={};
-    slaT.forEach(t=>{siteC[t.site]=(siteC[t.site]||0)+1;});
-    const ranked=Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,10);
-    return`## 🔴 SLA Violations (${pl})\n${label!==pl?`_Filter: ${label}_\n`:''}\n`+
-      ranked.map(([s,n],i)=>`${i===0?'🔴':i===1?'🟠':i===2?'🟡':'⚪'} **${s}** — **${num(n)}** breaches`).join('\n')+
-      `\n\n**Total:** ${num(slaT.length)} of ${num(pool.length)} tickets (${pct(slaT.length,pool.length)})`;
+  // OPERATIONAL HEALTH / WHAT TO DO TODAY (Q1-3, Q11-20, Q261-266, Q286-300 from list 2)
+  if(isHealth||isAction){
+    const open=src.filter(t=>isOpen(t));
+    const p1Open=src.filter(t=>t.pri==='P1'&&isOpen(t));
+    const slaB=src.filter(t=>t.slaBreached);
+    const ua=src.filter(t=>!t.agent||t.agent==='Unassigned');
+    const a30=open.filter(t=>ageDays(t)>=30);
+    const todayT=src.filter(t=>t.created>=sod).length;
+    const slaComp=Math.max(0,100-Math.round(slaB.length/Math.max(src.length,1)*100));
+    const thisM=src.filter(t=>t.created>=monthStart);
+    const lastMT=src.filter(t=>t.created>=lastMonthS&&t.created<=lastMonthE);
+    const diffM=thisM.length-lastMT.length;
+    const s=stats(open);
+    const risks=[];
+    if(p1Open.length>0)risks.push(`🔴 **${p1Open.length} active P1 tickets** — escalate immediately`);
+    if(slaComp<85)risks.push(`🟠 **SLA at ${slaComp}%** — below 85% target (${slaB.length} breaches)`);
+    if(ua.length>30)risks.push(`🟡 **${n(ua.length)} unassigned** — assign immediately`);
+    if(a30.length>20)risks.push(`🟡 **${n(a30.length)} tickets 30+ days old** — review backlog`);
+    if(slaB.length===0&&p1Open.length===0&&ua.length<=30)risks.push('✅ No critical issues detected today.');
+    const topSiteSLA=Object.entries(stats(slaB).siteC).sort((a,b)=>b[1]-a[1])[0];
+    const topOpenCat=s.topCat;
+    const singleAction=p1Open.length>0?`Resolve ${p1Open.length} active P1 tickets`:
+      slaComp<85?`Address ${slaB.length} SLA breaches (${100-slaComp}% breach rate)`:
+      ua.length>30?`Assign ${n(ua.length)} unassigned tickets`:
+      a30.length>20?`Review ${n(a30.length)} tickets open 30+ days`:
+      'Maintain current performance — no critical action required';
+    return[
+      `## 🚨 Operational Health & Actions — ${fd(now)}`,``,
+      `| KPI | Value | Status |`,`|-----|-------|--------|`,
+      `| Total Tickets | ${n(src.length)} | — |`,
+      `| Open/Active | ${n(open.length)} (${pct(open.length,src.length)}) | ${open.length>500?'⚠️':'✅'} |`,
+      `| SLA Compliance | ${slaComp}% | ${slaComp>=90?'✅ Good':slaComp>=85?'🟡 OK':'🔴 Below Target'} |`,
+      `| SLA Breached | ${n(slaB.length)} | ${slaB.length>50?'🔴':'🟡'} |`,
+      `| P1 Active | ${n(p1Open.length)} | ${p1Open.length>0?'🔴 Act Now':'✅'} |`,
+      `| Unassigned | ${n(ua.length)} | ${ua.length>30?'🟠':'✅'} |`,
+      `| Aging 30+ days | ${n(a30.length)} | ${a30.length>20?'🟠':'✅'} |`,
+      `| Created Today | ${n(todayT)} | — |`,
+      `| Month vs Last | ${diffM>=0?'+':''}${n(diffM)} | ${diffM>0?'📈':'📉'} |`,``,
+      `**⚠️ Issues Requiring Action:**\n`+risks.join('\n'),``,
+      topSiteSLA?`**Worst site for SLA:** ${topSiteSLA[0]} (${topSiteSLA[1]} breaches)`:null,
+      topOpenCat?`**Top open category:** ${topOpenCat[0]} (${topOpenCat[1]})`:null,``,
+      `**🎯 Single most important action:** _${singleAction}_`,
+    ].filter(x=>x!==null).join('\n');
   }
 
-  // ── P1 / CRITICAL ──────────────────────────────────────────────
-  if(/\bp1\b|\bcritical\b|\burgent\b/.test(ql)&&/\bopen\b|\bactive\b/.test(ql)){
-    const{pool,label,periodLabel:pl}=buildPool(ql,src);
-    const p1=pool.filter(t=>t.pri==='P1'&&['Open','In Progress','On Hold'].includes(t.st));
-    if(!p1.length)return`✅ No active P1 tickets for: ${label}`;
-    return`## ⚡ Active P1 Tickets (${pl})\n\n**${num(p1.length)} found:**\n\n`+
-      p1.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | ${t.agent||'Unassigned'} | Age:${ageDays(t)}d | ${(t.title||'').slice(0,50)}`).join('\n')+
-      (p1.length>20?`\n\n_…and ${p1.length-20} more_`:'');
+  // BACKLOG & PENDING (Q51-70, Q141-155, Q276-285 from list 2)
+  if(isBacklog){
+    const{pool,periodLabel:pl}=buildPool(ql,src);
+    const open=pool.filter(t=>isOpen(t));
+    const s=stats(open);
+    const oldest=open.sort((a,b)=>a.created-b.created)[0];
+    const topAgOH=Object.entries(s.agC).sort((a,b)=>b[1]-a[1]).slice(0,5);
+    const topSiteOH=s.sSites.slice(0,5);
+    const isCreExcRes=src.filter(t=>t.created>=last7).length>src.filter(t=>isDone(t)&&t.created>=last7).length;
+    return[
+      `## 📦 Backlog Analysis (${pl})`,``,
+      `- **Total open/active:** ${n(open.length)}`,
+      `- **Aging 30+ days:** ${n(s.a30)}`,
+      `- **Aging 60+ days:** ${n(s.a60)}`,
+      `- **Aging 90+ days:** ${n(s.a90)}`,
+      `- **Average age:** ${s.avgAge} days`,
+      `- **Unassigned (open):** ${n(open.filter(t=>!t.agent||t.agent==='Unassigned').length)}`,
+      `- **P1 in backlog:** ${n(open.filter(t=>t.pri==='P1').length)}`,
+      `- **Oldest ticket:** ${oldest?fd(oldest.created)+' ('+ageDays(oldest)+'d)':'—'}`,
+      `- **Creation > Resolution (last 7d):** ${isCreExcRes?'⚠️ Yes — backlog growing':'✅ No — backlog stable'}`,``,
+      `**By site (top 5):**\n`+topSiteOH.map(([s,x],i)=>`${i+1}. **${s}** — ${n(x)}`).join('\n'),``,
+      topAgOH.length?`**By agent (top 5):**\n`+topAgOH.map(([a,x],i)=>`${i+1}. **${a}** — ${n(x)}`).join('\n'):'',
+    ].filter(x=>x!=='').join('\n');
   }
 
-  // ── SPECIFIC SITE ──────────────────────────────────────────────
-  const sites=findSites(ql);
-  if(sites.length===1&&!/\bvs\b|\bversus\b/.test(ql)){
-    const site=sites[0];
-    const{pool,label,periodLabel:pl}=buildPool(ql,src.filter(t=>t.site===site));
-    if(!pool.length)return`No tickets found for **${site}** (${label}).`;
-    const s=stats(pool);
-    const topAgentStr=s.topAgent?`${s.topAgent[0]} (${s.topAgent[1]})`:'-';
-    return[`## 📍 ${site} — ${pl}`,
-      `- **Total:** ${num(pool.length)}`,
-      `- **Open/Active:** ${num(s.open)} (${pct(s.open,pool.length)})`,
-      `- **Closed/Resolved:** ${num(s.closed+s.resolved)} (${pct(s.closed+s.resolved,pool.length)})`,
-      `- **SLA Breached:** ${num(s.slaB)} (${pct(s.slaB,pool.length)})`,
-      `- **Open 30+ days:** ${num(s.aged30)}`,
-      `- **P1 Critical:** ${num(s.p1)}`,
-      `- **Unassigned:** ${num(pool.filter(t=>!t.agent||t.agent==='Unassigned').length)}`,
-      `- **Top categories:** ${s.topCats}`,
-      `- **Top agent:** ${topAgentStr}`,
-    ].join('\n');
-  }
-
-  // ── AGING ──────────────────────────────────────────────────────
-  if(/\baging\b|\baged\b|\bold\b|\bstale\b|\bolder than\b|\bno.*updat|\bstuck\b/.test(ql)){
+  // AGING (Q56, Q71-75, Q81-82 from list 2)
+  if(isAging){
     const{pool,label,periodLabel:pl,ageN:an}=buildPool(ql,src);
     const days=an||30;
-    const openT=pool.filter(t=>['Open','In Progress','On Hold'].includes(t.st)&&ageDays(t)>=days);
-    if(!openT.length)return`✅ No open tickets older than ${days} days for: ${label}`;
-    const siteC={};openT.forEach(t=>{siteC[t.site]=(siteC[t.site]||0)+1;});
-    const ranked=Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,8);
-    const oldest=Math.max(...openT.map(t=>ageDays(t)));
-    return`## ⏳ Open Tickets Older Than ${days} Days (${pl})\n\n**${num(openT.length)} total** · Oldest: **${oldest} days**\n\n`+
-      ranked.map(([s,n],i)=>`${i+1}. **${s}** — ${num(n)} tickets`).join('\n');
+    const openT=pool.filter(t=>isOpen(t));
+    const aged=openT.filter(t=>ageDays(t)>=days);
+    if(!aged.length)return`✅ No open tickets older than ${days} days for: ${label}`;
+    const oldest=Math.max(...aged.map(t=>ageDays(t)));
+    const avgA=Math.round(aged.reduce((a,t)=>a+ageDays(t),0)/Math.max(aged.length,1));
+    const medArr=aged.map(t=>ageDays(t)).sort((a,b)=>a-b);
+    const median=medArr[Math.floor(medArr.length/2)];
+    const siteC={},agC={};
+    aged.forEach(t=>{siteC[t.site]=(siteC[t.site]||0)+1;if(t.agent&&t.agent!=='Unassigned')agC[t.agent]=(agC[t.agent]||0)+1;});
+    const topSite=Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,5);
+    const topAg=Object.entries(agC).sort((a,b)=>b[1]-a[1]).slice(0,5);
+    return[
+      `## ⏳ Aging Tickets ${days}+ Days (${pl})`,``,
+      `- **${days}+ days open:** ${n(aged.length)}`,
+      `- **60+ days:** ${n(openT.filter(t=>ageDays(t)>=60).length)}`,
+      `- **90+ days:** ${n(openT.filter(t=>ageDays(t)>=90).length)}`,
+      `- **Oldest:** ${oldest} days · **Avg:** ${avgA} days · **Median:** ${median} days`,``,
+      `**By site:**\n`+topSite.map(([s,x],i)=>`${i+1}. **${s}** — ${n(x)}`).join('\n'),``,
+      topAg.length?`**By agent:**\n`+topAg.map(([a,x],i)=>`${i+1}. **${a}** — ${n(x)}`).join('\n'):'',
+    ].filter(x=>x!=='').join('\n');
   }
 
-  // ── CATEGORY / DEPARTMENT BREAKDOWN ───────────────────────────
-  if(/categor|department|dept|techgroup|breakdown|which.*type|per.*type|by.*type/.test(ql)||findCats(ql).length||findTechgroups(ql).length){
+  // RECURRING / ROOT CAUSE (Q6-8, Q91-100, Q206-220 from list 2)
+  if(isRecurr){
+    const{pool,periodLabel:pl}=buildPool(ql,src);
+    const s=stats(pool);
+    const topCats=s.sCats.slice(0,8);
+    const slaByC={};pool.filter(t=>t.slaBreached).forEach(t=>{slaByC[t.cat]=(slaByC[t.cat]||0)+1;});
+    const worstSLA=Object.entries(slaByC).sort((a,b)=>b[1]-a[1])[0];
+    const openByC={};pool.filter(t=>isOpen(t)).forEach(t=>{openByC[t.cat]=(openByC[t.cat]||0)+1;});
+    const mostBacklog=Object.entries(openByC).sort((a,b)=>b[1]-a[1])[0];
+    return[
+      `## 🔁 Recurring Issues & Root Cause (${pl})`,``,
+      `**Top categories by volume:**\n`+topCats.map(([c,x],i)=>`${medal(i)} **${c}** — ${n(x)} (${pct(x,pool.length)})`).join('\n'),``,
+      s.topCat?`**Primary driver:** ${s.topCat[0]} (${s.topCat[1]} tickets) — likely candidate for automation or KB article.`:'',
+      worstSLA?`**Highest SLA failure:** ${worstSLA[0]} (${worstSLA[1]} breaches) — needs process review.`:'',
+      mostBacklog?`**Largest backlog category:** ${mostBacklog[0]} (${mostBacklog[1]} open)`:'',
+      `\n_Categories with high volume + SLA failures = root cause priorities for improvement._`,
+    ].filter(x=>x!=='').join('\n');
+  }
+
+  // ENGINEER PERFORMANCE (Q41-60, Q121-140, Q171-190 from list 2)
+  if(isEngPerf||isTeam){
+    const{pool,periodLabel:pl}=buildPool(ql,src);
+    const agC={},agSLA={},agOpen={},agCl={},agTG={};
+    pool.forEach(t=>{
+      if(!t.agent||t.agent==='Unassigned')return;
+      agC[t.agent]=(agC[t.agent]||0)+1;
+      if(t.slaBreached)agSLA[t.agent]=(agSLA[t.agent]||0)+1;
+      if(isOpen(t))agOpen[t.agent]=(agOpen[t.agent]||0)+1;
+      if(isDone(t))agCl[t.agent]=(agCl[t.agent]||0)+1;
+      if(t.techgroup){if(!agTG[t.agent])agTG[t.agent]={};agTG[t.agent][t.techgroup]=(agTG[t.agent][t.techgroup]||0)+1;}
+    });
+    const ranked=Object.entries(agC).sort((a,b)=>b[1]-a[1]).slice(0,10);
+    if(!ranked.length)return`No agent data for: ${pl}`;
+    const agNames=Object.keys(agC);const avgTix=pool.filter(t=>t.agent&&t.agent!=='Unassigned').length/Math.max(agNames.length,1);
+    const overloaded=Object.entries(agC).filter(([,x])=>x>avgTix*1.5).map(([a,x])=>a+'('+x+')').join(', ');
+    const underutil=Object.entries(agC).filter(([,x])=>x<avgTix*0.5).map(([a,x])=>a+'('+x+')').join(', ');
+    const mostSLA=Object.entries(agSLA).sort((a,b)=>b[1]-a[1])[0];
+    const mostOpen=Object.entries(agOpen).sort((a,b)=>b[1]-a[1])[0];
+    return[
+      `## 👥 Engineer Performance (${pl})`,``,
+      `**Top 10 by ticket volume:**\n`+ranked.map(([a,x],i)=>{
+        const sl=agSLA[a]||0,op=agOpen[a]||0,cl=agCl[a]||0;
+        const slaRate=x>0?Math.round(sl/x*100):0;
+        return`${medal(i)} **${a}** — ${n(x)} total · Open:${op} · Closed:${cl} · SLA⚠:${sl}(${slaRate}%)`;
+      }).join('\n'),``,
+      `**Avg tickets per agent:** ${Math.round(avgTix)}`,
+      overloaded?`**⚠️ Potentially overloaded:** ${overloaded}`:null,
+      underutil?`**💤 Potentially underutilized:** ${underutil}`:null,
+      mostSLA?`**Most SLA breaches:** ${mostSLA[0]} (${mostSLA[1]})`:null,
+      mostOpen?`**Most open tickets:** ${mostOpen[0]} (${n(mostOpen[1])})`:null,
+    ].filter(x=>x!==null).join('\n');
+  }
+
+  // SLA (Q101-120, Q1-2 from list 2)
+  if(isSLAq){
+    const{pool,label,periodLabel:pl}=buildPool(ql,src);
+    const slaT=pool.filter(t=>t.slaBreached);
+    if(!slaT.length)return`✅ **No SLA breaches** for: ${label}\n\n_SLA compliance: 100% for this filter._`;
+    const siteC={},catC={},agC={};
+    slaT.forEach(t=>{siteC[t.site]=(siteC[t.site]||0)+1;catC[t.cat]=(catC[t.cat]||0)+1;if(t.agent&&t.agent!=='Unassigned')agC[t.agent]=(agC[t.agent]||0)+1;});
+    const topSites=Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,5);
+    const topCats=Object.entries(catC).sort((a,b)=>b[1]-a[1]).slice(0,3);
+    const topAgs=Object.entries(agC).sort((a,b)=>b[1]-a[1]).slice(0,3);
+    const slaComp=Math.max(0,100-Math.round(slaT.length/Math.max(pool.length,1)*100));
+    const p1Breach=slaT.filter(t=>t.pri==='P1').length;
+    return[
+      `## 🔴 SLA Analysis (${pl})`,``,
+      `- **Total breaches:** ${n(slaT.length)} of ${n(pool.length)} tickets`,
+      `- **SLA Compliance:** ${slaComp}% ${slaComp>=90?'✅ Good':slaComp>=85?'🟡 OK':'🔴 Below Target'}`,
+      `- **P1 breaches:** ${n(p1Breach)} ${p1Breach>0?'⚡ Critical':''}`,
+      `- **Target:** 85% compliance`,
+      `- **Gap to target:** ${slaComp>=85?'✅ Meeting target':Math.abs(85-slaComp)+'% below target'}`,``,
+      `**Worst sites:**\n`+topSites.map(([s,x],i)=>`${i===0?'🔴':i===1?'🟠':i===2?'🟡':'⚪'} **${s}** — ${n(x)}`).join('\n'),``,
+      `**Worst categories:**\n`+topCats.map(([c,x],i)=>`${i+1}. **${c}** — ${n(x)}`).join('\n'),``,
+      topAgs.length?`**Agents with most breaches:**\n`+topAgs.map(([a,x],i)=>`${i+1}. **${a}** — ${n(x)}`).join('\n'):'',
+    ].filter(x=>x!=='').join('\n');
+  }
+
+  // FORECAST / WHAT IF (Q121-140, Q281-300 from list 1)
+  if(isForecast){
+    const md=monthlyData(src);
+    const recent3=md.slice(-3);const avg3=Math.round(recent3.reduce((a,m)=>a+m.total,0)/3);
+    const trend3=md[md.length-1].total-md[md.length-2].total;
+    const forecastNext=Math.max(0,md[md.length-1].total+trend3);
+    const openNow=src.filter(t=>isOpen(t)).length;
+    const slaComp=Math.max(0,100-Math.round(src.filter(t=>t.slaBreached).length/Math.max(src.length,1)*100));
+    const agentCount=new Set(src.filter(t=>t.agent&&t.agent!=='Unassigned').map(t=>t.agent)).size;
+    const ratioPerAgent=Math.round(openNow/Math.max(agentCount,1));
+    const slaRisk=slaComp<85?'🔴 High — already below target':slaComp<90?'🟡 Moderate — approaching threshold':'✅ Low — comfortable buffer';
+    return[
+      `## 🔮 Forecast & What-If Analysis`,``,
+      `**Based on last 3 months avg: ${n(avg3)} tickets/month**`,``,
+      `| Scenario | Estimate |`,`|----------|----------|`,
+      `| Next month ticket volume | ~${n(forecastNext)} |`,
+      `| If volume doubles | ~${n(forecastNext*2)} tickets — ${ratioPerAgent*2} per agent |`,
+      `| If staffing -20% | ${Math.round(agentCount*0.8)} agents → ${Math.round(openNow/(agentCount*0.8))} open/agent |`,
+      `| If backlog grows 20% | ~${Math.round(openNow*1.2)} open tickets |`,``,
+      `**Current SLA risk:** ${slaRisk}`,
+      `**Open tickets per agent:** ${ratioPerAgent} (${agentCount} active agents)`,
+      `**Trend:** ${trend3>0?'📈 Volume increasing':'📉 Volume decreasing'} (${trend3>0?'+':''}${trend3}/month)`,``,
+      slaComp<85?`⚠️ **If no action taken:** SLA compliance will continue declining.`:
+        openNow>500?`⚠️ **If backlog grows:** Agent overload risk increases.`:
+        `✅ **Current trajectory:** Manageable with existing resources.`,
+    ].join('\n');
+  }
+
+  // SPIKE ANALYSIS (Q266-275 from list 2)
+  if(isSpikeQ){
+    const todayT=src.filter(t=>t.created>=sod);
+    const yesterT=src.filter(t=>t.created>=yesterday&&t.created<sod);
+    const avgDaily=src.filter(t=>t.created>=last7).length/7;
+    const isSpike=todayT.length>avgDaily*1.5;
+    const siteC={},catC={};todayT.forEach(t=>{siteC[t.site]=(siteC[t.site]||0)+1;catC[t.cat]=(catC[t.cat]||0)+1;});
+    const topSite=Object.entries(siteC).sort((a,b)=>b[1]-a[1])[0];
+    const topCat=Object.entries(catC).sort((a,b)=>b[1]-a[1])[0];
+    return[
+      `## 📊 Ticket Volume Spike Analysis`,``,
+      `- **Today:** ${n(todayT.length)} tickets created`,
+      `- **Yesterday:** ${n(yesterT.length)}`,
+      `- **7-day daily avg:** ${Math.round(avgDaily)}`,
+      `- **Spike detected:** ${isSpike?'⚠️ Yes — '+(Math.round(todayT.length/Math.max(avgDaily,1)*100)-100)+'% above average':'✅ No — within normal range'}`,``,
+      topSite?`**Largest contributor:** ${topSite[0]} (${topSite[1]} tickets today)`:null,
+      topCat?`**Top category today:** ${topCat[0]} (${topCat[1]})`:null,
+      `**Action:** ${isSpike?'Investigate '+topSite?.[0]+' — may indicate incident or outage':'Monitor — volume within expected range'}`,
+    ].filter(x=>x!==null).join('\n');
+  }
+
+  // AUTOMATION / PROCESS (Q221-240 from list 1)
+  if(isAutomate){
+    const{pool,periodLabel:pl}=buildPool(ql,src);
+    const s=stats(pool);
+    const topCats=s.sCats.slice(0,5);
+    return[
+      `## ⚙️ Automation & Process Improvement (${pl})`,``,
+      `**Best candidates for automation/self-service (highest volume):**`,``,
+      topCats.map(([c,x],i)=>`${i+1}. **${c}** — ${n(x)} tickets (${pct(x,pool.length)}) — ${x>50?'🔴 High priority for automation':'🟡 Consider KB article'}`).join('\n'),``,
+      `**Why these?** High-volume categories with repetitive patterns are best candidates for knowledge base articles, self-service portals, or automated workflows.`,``,
+      `**Recommendations:**`,
+      `- Create self-service guides for top 2-3 categories`,
+      `- Review if recurring tickets can be resolved via KB article`,
+      `- Identify tickets with 0 agent updates — may indicate routing issues`,
+    ].join('\n');
+  }
+
+  // TICKET REVIEW (Q21-40 from list 1)
+  if(isTicketRev){
+    const{pool,label,periodLabel:pl}=buildPool(ql,src);
+    const p1=pool.filter(t=>t.pri==='P1'&&isOpen(t));
+    const slaRisk=pool.filter(t=>isOpen(t)&&t.slaBreached);
+    const aged60=pool.filter(t=>isOpen(t)&&ageDays(t)>=60);
+    const ua=pool.filter(t=>isOpen(t)&&(!t.agent||t.agent==='Unassigned'));
+    return[
+      `## 🎫 Tickets Requiring Review (${pl})`,``,
+      `**🔴 Escalate Immediately (${p1.length+slaRisk.length}):**`,
+      p1.length?p1.slice(0,5).map(t=>`- **${t.id}** | P1 | ${t.site} | ${t.agent||'Unassigned'}`).join('\n'):'  _None_',
+      slaRisk.length?`_+ ${slaRisk.length} SLA-breached open tickets_`:'',``,
+      `**⏳ Long-Aging (60+ days):** ${n(aged60.length)}`,
+      aged60.length?aged60.slice(0,5).map(t=>`- **${t.id}** | ${t.site} | Age:${ageDays(t)}d | ${t.agent||'Unassigned'}`).join('\n'):'  _None_',``,
+      `**👤 Unassigned (${ua.length}):**`,
+      ua.length?ua.slice(0,5).map(t=>`- **${t.id}** | ${t.site} | ${t.cat} | ${t.pri}`).join('\n')+'_'+(ua.length>5?'\n_…+'+(ua.length-5)+' more_':''):'  _None_',
+    ].filter(x=>x!==null).join('\n');
+  }
+
+  // WHO CONTACTS / REQUESTERS (Q141-160 from list 1, Q37-40 from list 2)
+  if(isContactQ){
+    const{pool,periodLabel:pl}=buildPool(ql,src);
+    const reqC={};
+    pool.forEach(t=>{const r=t.raw?.contact_id_value||'Unknown';reqC[r]=(reqC[r]||0)+1;});
+    const ranked=Object.entries(reqC).sort((a,b)=>b[1]-a[1]).slice(0,10).filter(([r])=>r!=='Unknown');
+    if(!ranked.length)return`No requester data available. User/contact info may not be in the dataset.`;
+    return`## 👥 Top Requesters (${pl})\n\n`+ranked.map(([r,x],i)=>`${medal(i)} **${r}** — ${n(x)} tickets`).join('\n');
+  }
+
+  // P1 / CRITICAL
+  if(/\bp1\b|\bcritical\b|\burgent\b/.test(ql)&&/\bopen\b|\bactive\b/.test(ql)){
+    const{pool,label,periodLabel:pl}=buildPool(ql,src);
+    const p1=pool.filter(t=>t.pri==='P1'&&isOpen(t));
+    if(!p1.length)return`✅ No active P1 tickets for: ${label}`;
+    return`## ⚡ Active P1 Tickets (${pl})\n\n**${n(p1.length)} found:**\n\n`+
+      p1.slice(0,20).map(t=>`- **${t.id}** | ${t.site} | ${t.st} | ${t.agent||'Unassigned'} | Age:${ageDays(t)}d | ${(t.title||'').slice(0,50)}`).join('\n')+
+      (p1.length>20?`\n\n_…+${p1.length-20} more_`:'');
+  }
+
+  // RANKING
+  if(/\bmost\b|\btop\b|\bworst\b|\bbest\b|\bhighest\b|\blowest\b|\brank|\bwho has\b|\bwhich site\b|\bwho handles\b|\bwho.*most\b|\bwho.*least\b|\bwhich.*location\b/.test(ql)){
+    const{pool,label,periodLabel:pl,cats,tgs}=buildPool(ql,src);
+    const N=parseInt(ql.match(/top\s*(\d+)/)?.[1]||'10');
+    const wO=/\bopen\b|\bactive\b/.test(ql)&&!/closed/.test(ql);
+    const wS=/\bsla\b|\bviolat|\bbreach/.test(ql);
+    const wC=/\bclosed\b|\bresolved\b|\bdone\b/.test(ql)&&!/\bopen\b/.test(ql);
+    const wU=/unassign/.test(ql);
+    const byAg=/\bwho\b|\bagent\b|\bengineer\b|\bstaff\b|\bassignee\b|\bassigned\b/.test(ql);
+    let sub=pool;
+    if(wO)sub=pool.filter(t=>isOpen(t));if(wC)sub=pool.filter(t=>isDone(t));if(wS)sub=pool.filter(t=>t.slaBreached);if(wU)sub=pool.filter(t=>!t.agent||t.agent==='Unassigned');
+    const gk=byAg?t=>t.agent:t=>t.site;
+    const gC={};sub.filter(t=>gk(t)&&gk(t)!=='Unassigned').forEach(t=>{const k=gk(t);gC[k]=(gC[k]||0)+1;});
+    const ranked=Object.entries(gC).sort((a,b)=>b[1]-a[1]).slice(0,N);
+    if(!ranked.length)return`No data found for: ${label}`;
+    const tL=wO?'open tickets':wS?'SLA violations':wC?'closed/resolved':wU?'unassigned':'tickets';
+    const ctx=[...cats,...tgs].join(', ')||'';
+    return`## 🏆 Most ${tL.charAt(0).toUpperCase()+tL.slice(1)}${ctx?' — '+ctx:''} (${pl})\n\n`+
+      ranked.map(([k,x],i)=>`${medal(i)} **${k}** — **${n(x)}** ${tL}`).join('\n')+
+      `\n\n_Total: ${n(sub.filter(t=>gk(t)&&gk(t)!=='Unassigned').length)}_`;
+  }
+
+  // UNASSIGNED
+  if(/\bunassign|\bno agent|\bnobody|\bnot assigned|\bno owner|\bclear.*owner/.test(ql)){
+    const{pool,periodLabel:pl}=buildPool(ql,src);
+    const ua=pool.filter(t=>!t.agent||t.agent==='Unassigned');
+    const siteC={};ua.forEach(t=>{siteC[t.site]=(siteC[t.site]||0)+1;});
+    const ranked=Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,10);
+    return`## 👤 Unassigned (${pl})\n\n**${n(ua.length)}** (${pct(ua.length,pool.length)})\n`+
+      (ua.filter(t=>t.pri==='P1').length>0?`⚡ **${ua.filter(t=>t.pri==='P1').length} unassigned P1 tickets!**\n`:'')+`\n`+
+      ranked.map(([s,x],i)=>`${i+1}. **${s}** — ${n(x)}`).join('\n');
+  }
+
+  // SPECIFIC SITE
+  const qSites=findSites(ql);
+  if(qSites.length===1&&!/\bvs\b|\bversus\b/.test(ql)){
+    const site=qSites[0];
+    const{pool,label,periodLabel:pl}=buildPool(ql,src.filter(t=>t.site===site));
+    if(!pool.length)return`No tickets for **${site}** (${label}).`;
+    const s=stats(pool);
+    return[`## 📍 ${site} — ${pl}`,
+      `- **Total:** ${n(pool.length)}`,
+      `- **Open/Active:** ${n(s.open)} (${pct(s.open,pool.length)})`,
+      `- **Closed/Resolved:** ${n(s.cl+s.rs)} (${pct(s.cl+s.rs,pool.length)})`,
+      `- **SLA Compliance:** ${s.slaComp}% ${s.slaComp>=90?'✅':s.slaComp>=85?'🟡':'🔴'}`,
+      `- **SLA Breached:** ${n(s.sb)}`,
+      `- **Aging 30+:** ${n(s.a30)} · 60+: ${n(s.a60)} · 90+: ${n(s.a90)}`,
+      `- **P1 Active:** ${n(s.p1)}`,
+      `- **Unassigned:** ${n(s.ua)}`,
+      `- **Avg open age:** ${s.avgAge} days`,
+      `- **Top categories:** ${s.topCats}`,
+      s.topAgent?`- **Top agent:** ${s.topAgent[0]} (${s.topAgent[1]})`:'',
+    ].filter(Boolean).join('\n');
+  }
+
+  // CATEGORY / DEPT BREAKDOWN
+  if(/categor|department|dept|techgroup|breakdown|by\s*type/.test(ql)||findCats(ql).length||findTG(ql).length){
     const{pool,label,cats,tgs,periodLabel:pl}=buildPool(ql,src);
     const catC={};pool.forEach(t=>{catC[t.cat]=(catC[t.cat]||0)+1;});
     const ranked=Object.entries(catC).sort((a,b)=>b[1]-a[1]);
     const topCat=ranked[0];
-    const ctx=[...cats,...tgs].join(', ')||'all categories';
+    const slaByC={};pool.filter(t=>t.slaBreached).forEach(t=>{slaByC[t.cat]=(slaByC[t.cat]||0)+1;});
+    const worstSLA=Object.entries(slaByC).sort((a,b)=>b[1]-a[1])[0];
+    const ctx=[...cats,...tgs].join(', ')||'all';
     return`## 📂 ${ctx} — ${pl}\n\n`+
-      `**Total: ${num(pool.length)}** · Open: ${pool.filter(t=>['Open','In Progress'].includes(t.st)).length} · SLA Breached: ${pool.filter(t=>t.slaBreached).length}\n\n`+
-      (topCat?`🏆 **Top category: ${topCat[0]}** with **${num(topCat[1])}** tickets\n\n`:'')+
-      ranked.slice(0,15).map(([c,n],i)=>`${i+1}. **${c}** — ${num(n)} (${pct(n,pool.length)})`).join('\n');
+      `**Total: ${n(pool.length)}** · Open: ${pool.filter(t=>isOpen(t)).length} · SLA Breached: ${pool.filter(t=>t.slaBreached).length}\n\n`+
+      (topCat?`🏆 **Most tickets:** ${topCat[0]} (${n(topCat[1])}) — ${pct(topCat[1],pool.length)}\n`:'')+
+      (worstSLA?`🔴 **Highest SLA breaches:** ${worstSLA[0]} (${worstSLA[1]})\n\n`:'\n')+
+      ranked.slice(0,15).map(([c,x],i)=>`${i+1}. **${c}** — ${n(x)} (${pct(x,pool.length)})`).join('\n');
   }
 
-  // ── UNASSIGNED ─────────────────────────────────────────────────
-  if(/\bunassign|\bno agent|\bnobody assigned|\bnot assigned/.test(ql)){
-    const{pool,label,periodLabel:pl}=buildPool(ql,src);
-    const ua=pool.filter(t=>!t.agent||t.agent==='Unassigned');
-    const siteC={};ua.forEach(t=>{siteC[t.site]=(siteC[t.site]||0)+1;});
-    const ranked=Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,10);
-    return`## 👤 Unassigned Tickets (${pl})\n\n**${num(ua.length)}** unassigned (${pct(ua.length,pool.length)} of total)\n\n`+
-      ranked.map(([s,n],i)=>`${i+1}. **${s}** — ${num(n)}`).join('\n');
-  }
-
-  // ── SUMMARY ────────────────────────────────────────────────────
-  if(/\bsummar|\boverview|\bdashboard|\bhow are we\b|\bhow.*doing\b|\bhealth\b/.test(ql)){
-    const{pool,periodLabel:pl}=buildPool(ql,src);
-    const s=stats(pool);
-    const todayT=pool.filter(t=>t.created>=sod).length;
-    const comp=Math.max(0,100-Math.round(s.slaB/Math.max(pool.length,1)*100));
-    return[`## 📊 Dashboard Summary — ${pl}`,``,
-      `- 📋 **Total:** ${num(pool.length)}`,
-      `- 🟡 **Open/Active:** ${num(s.open)} (${pct(s.open,pool.length)})`,
-      `- ✅ **Closed/Resolved:** ${num(s.closed+s.resolved)} (${pct(s.closed+s.resolved,pool.length)})`,
-      `- 🔴 **SLA Breached:** ${num(s.slaB)} — Compliance: **${comp}%**`,
-      `- 👤 **Unassigned:** ${num(pool.filter(t=>!t.agent||t.agent==='Unassigned').length)}`,
-      `- ⏳ **Open 30+ days:** ${num(s.aged30)}`,
-      `- 📅 **Created today:** ${num(todayT)}`,
-      `- 🏷️ **Top category:** ${Object.entries(s.catC).sort((a,b)=>b[1]-a[1])[0]?.[0]||'—'}`,``,
-      comp>=90?`✅ SLA health good (above 85% target)`:s.slaB>50?`⚠️ ${num(s.slaB)} SLA breaches need attention`:`📊 SLA at ${comp}%`,
+  // WHEN (global, no agent)
+  if(isWhen){
+    const{pool}=buildPool(ql,src);
+    const sorted=pool.filter(t=>t.created).sort((a,b)=>a.created-b.created);
+    if(!sorted.length)return'No dated tickets found.';
+    const wF=/\bfirst\b|\boldest\b|\bearli/.test(ql);
+    const tgt=wF?sorted[0]:sorted[sorted.length-1];
+    return[`## ${wF?'Oldest':'Most Recent'} Ticket`,
+      `- **Date:** ${fd(tgt.created)}`,`- **Time:** ${ft(tgt.created)}`,
+      `- **${da(tgt.created)}**`,`- **Ticket:** ${tgt.id}`,
+      `- **Agent:** ${tgt.agent||'Unassigned'}`,`- **Site:** ${tgt.site}`,
+      `- **Status:** ${tgt.st}`,`- **Title:** ${(tgt.title||'—').slice(0,80)}`,
     ].join('\n');
   }
 
-  // ── GENERIC COUNT ──────────────────────────────────────────────
-  if(/\bhow many\b|\bcount\b|\btotal\b|\bnumber of\b/.test(ql)){
-    const{pool,label,periodLabel:pl}=buildPool(ql,src);
+  // SUMMARY
+  if(/\bsummar|\boverview|\bdashboard|\boverall\b|\bhow.*doing\b/.test(ql)){
+    const{pool,periodLabel:pl}=buildPool(ql,src);
     const s=stats(pool);
-    return`**${num(pool.length)} tickets** match: _${label}_\n\n`+
-      `- Open/Active: ${num(s.open)}\n- Closed/Resolved: ${num(s.closed+s.resolved)}\n- SLA Breached: ${num(s.slaB)}\n- Unassigned: ${num(pool.filter(t=>!t.agent||t.agent==='Unassigned').length)}`;
+    const todayT=pool.filter(t=>t.created>=sod).length;
+    const thisM=pool.filter(t=>t.created>=monthStart).length;
+    const lastMT=src.filter(t=>t.created>=lastMonthS&&t.created<=lastMonthE).length;
+    const diff=thisM-lastMT;
+    return[`## 📊 Dashboard Summary — ${pl}`,``,
+      `| KPI | Value | Status |`,`|-----|-------|--------|`,
+      `| Total | ${n(pool.length)} | — |`,
+      `| Open/Active | ${n(s.open)} (${pct(s.open,pool.length)}) | ${s.open>500?'⚠️':'✅'} |`,
+      `| Closed/Resolved | ${n(s.cl+s.rs)} (${pct(s.cl+s.rs,pool.length)}) | — |`,
+      `| SLA Compliance | ${s.slaComp}% | ${s.slaComp>=90?'✅':s.slaComp>=85?'🟡':'🔴'} |`,
+      `| P1 Active | ${n(s.p1)} | ${s.p1>0?'🔴':'✅'} |`,
+      `| Unassigned | ${n(s.ua)} | ${s.ua>30?'🟠':'✅'} |`,
+      `| Aging 30+ | ${n(s.a30)} | ${s.a30>20?'🟠':'✅'} |`,
+      `| Created Today | ${n(todayT)} | — |`,``,
+      `**Month vs last:** ${diff>=0?'+':''}${n(diff)} (${diff>=0?'📈':'📉'})`,
+      `**Top category:** ${s.topCat?s.topCat[0]:'—'}`,
+      `**Top site:** ${s.topSite?s.topSite[0]:'—'}`,
+      `**Top agent:** ${s.topAgent?s.topAgent[0]:'—'}`,
+    ].join('\n');
   }
 
-  // ── PERIOD SNAPSHOT ────────────────────────────────────────────
+  // HOW MANY
+  if(/\bhow many\b|\bcount\b|\btotal\b|\bnumber of\b|\bhow.*ticket\b/.test(ql)){
+    const{pool,label,periodLabel:pl}=buildPool(ql,src);
+    const s=stats(pool);
+    return`**${n(pool.length)} tickets** — _${label}_\n\n`+
+      `- Open/Active: ${n(s.open)}\n- In Progress: ${n(s.ip)}\n- On Hold: ${n(s.oh)}\n`+
+      `- Closed: ${n(s.cl)}\n- Resolved: ${n(s.rs)}\n- SLA Breached: ${n(s.sb)}\n- Unassigned: ${n(s.ua)}`;
+  }
+
+  // PERIOD SNAPSHOT
   const period=parsePeriod(ql);
   if(period){
-    const pool=applyPeriod(src,period);
-    const s=stats(pool);
-    const siteC={};pool.forEach(t=>{siteC[t.site]=(siteC[t.site]||0)+1;});
-    const top3=Object.entries(siteC).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([s,n])=>`**${s}** (${n})`).join(', ');
-    const topCat=Object.entries(s.catC).sort((a,b)=>b[1]-a[1])[0];
+    const pool=applyPeriod(src,period);const s=stats(pool);
+    const top3=s.sSites.slice(0,3).map(([x,c])=>`**${x}**(${c})`).join(', ');
     return[`## 📅 ${period.label} Snapshot`,
-      `- **Total:** ${num(pool.length)}`,
-      `- **Open/Active:** ${num(s.open)}`,
-      `- **Closed/Resolved:** ${num(s.closed+s.resolved)}`,
-      `- **SLA Breached:** ${num(s.slaB)}`,
-      `- **Unassigned:** ${num(pool.filter(t=>!t.agent||t.agent==='Unassigned').length)}`,
+      `- **Total:** ${n(pool.length)}`,`- **Open/Active:** ${n(s.open)}`,
+      `- **Closed/Resolved:** ${n(s.cl+s.rs)}`,
+      `- **SLA:** ${n(s.sb)} breaches (${s.slaComp}% compliance)`,
+      `- **Unassigned:** ${n(s.ua)}`,`- **P1 Active:** ${n(s.p1)}`,
       top3?`- **Top sites:** ${top3}`:'',
-      topCat?`- **Top category:** ${topCat[0]} (${topCat[1]})`:'',
+      s.topCat?`- **Top category:** ${s.topCat[0]} (${s.topCat[1]})`:'',
     ].filter(Boolean).join('\n');
   }
 
-  // ── FALLBACK ───────────────────────────────────────────────────
+  // FALLBACK
   const{pool:fp,label:fl}=buildPool(ql,src);
   if(fp.length<src.length&&fp.length>0){
     const s=stats(fp);
-    return`**${num(fp.length)} tickets** match: _${fl}_\n\n`+
-      `- Open: ${num(s.open)} · Closed: ${num(s.closed+s.resolved)} · SLA: ${num(s.slaB)}\n\n`+
-      `_Try: "who has the most?" or "show list" or "compare sites"_`;
+    return`**${n(fp.length)} tickets** match: _${fl}_\n\n- Open: ${n(s.open)} · Closed: ${n(s.cl+s.rs)} · SLA: ${n(s.sb)}\n\n_Try: "who has the most?", "compare sites", "rank by SLA"_`;
   }
 
-  return`I can answer questions about **${num(src.length)} tickets**. Examples:\n\n`+
-    `- _"sunga feb 11 2026 vs may 30 2026"_ — date comparison\n`+
-    `- _"arceo november 2025"_ — agent by month\n`+
-    `- _"who has most open in tpmo this month"_ — ranking by dept\n`+
-    `- _"which site has most sla violations"_ — SLA ranking\n`+
-    `- _"compare aura vs pica"_ — site comparison\n`+
-    `- _"open tickets older than 30 days"_ — aging\n`+
-    `- _"is volume increasing"_ — trend\n`+
-    `- _"list all agents"_ · _"list all departments"_ · _"list all sites"_`;
+  return`I can answer **any** question about your **${n(src.length)} tickets**. Examples:\n\n`+
+    `**People:** _"arceo november 2025"_ · _"when was sunga's last ticket"_ · _"who is overloaded"_\n`+
+    `**Sites:** _"aura this month"_ · _"aura vs pica"_ · _"which site has most SLA violations"_\n`+
+    `**Depts:** _"tpmo open tickets"_ · _"service desk sla this week"_ · _"which team is overloaded"_\n`+
+    `**Dates:** _"november 2025"_ · _"jan 15 2026"_ · _"Q1 2025"_ · _"this month vs last month"_\n`+
+    `**Operations:** _"what needs attention today"_ · _"what changed since yesterday"_ · _"forecast next month"_\n`+
+    `**Backlog:** _"backlog analysis"_ · _"tickets older than 60 days"_ · _"aging tickets"_\n`+
+    `**Trends:** _"is volume increasing"_ · _"recurring issues"_ · _"root cause analysis"_\n`+
+    `**Lists:** _"list all agents"_ · _"list all sites"_ · _"list all departments"_`;
 }
 function sendAIMessage(){
   if(_aiThinking) return;

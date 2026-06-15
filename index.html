@@ -3000,6 +3000,41 @@ let _aiHistory = [];
 // ══════════════════════════════════════════════════════════════════
 let _idx = { agents:[], sites:[], cats:[], techgroups:[], subcats:[], statuses:[], priorities:[] };
 
+function buildSearchIndex() {
+  const src = T.length ? T : getData();
+  if (!src.length) return;
+
+  const sets = {
+    agents: new Set(), sites: new Set(), cats: new Set(),
+    techgroups: new Set(), subcats: new Set(), statuses: new Set(), priorities: new Set(),
+  };
+
+  src.forEach(t => {
+    if (t.agent && t.agent !== 'Unassigned') sets.agents.add(t.agent);
+    if (t.site)      sets.sites.add(t.site);
+    if (t.cat)       sets.cats.add(t.cat);
+    if (t.techgroup) sets.techgroups.add(t.techgroup);
+    if (t.st)        sets.statuses.add(t.st);
+    if (t.pri)       sets.priorities.add(t.pri);
+    const sub = t.raw?.cf_2583;
+    if (sub && sub.trim()) sets.subcats.add(sub.trim());
+  });
+
+  _idx.agents     = [...sets.agents].sort();
+  _idx.sites      = [...sets.sites].sort();
+  _idx.cats       = [...sets.cats].sort();
+  _idx.techgroups = [...sets.techgroups].sort();
+  _idx.subcats    = [...sets.subcats].sort();
+  _idx.statuses   = [...sets.statuses].sort();
+  _idx.priorities = [...sets.priorities].sort();
+
+  console.log('[Index] agents:'+_idx.agents.length+
+    ' sites:'+_idx.sites.length+
+    ' cats:'+_idx.cats.length+
+    ' techgroups:'+_idx.techgroups.length+
+    ' subcats:'+_idx.subcats.length);
+}
+
 function queryTickets(q) {
   const src = T.length ? T : getData();
   if (!src.length) return '_No data loaded yet._';
